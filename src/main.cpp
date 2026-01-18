@@ -14,30 +14,40 @@ static const char* BLE_NAME = "geelyController";
 static const char* SERVICE_UUID        = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
 static const char* CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
 
-// ================= Pins =================
+// ================= Pins (ESP32-C3 Super Mini) =================
 #define LED_BUILTIN 8
-// encoder1
-static const int PIN_CLK = 5;
-static const int PIN_DT  = 6;
-static const int PIN_SW  = 7;
 
-// Screen
+// Encoder1 (KY-040: CLK, DT, SW)
+static const int ENC1_CLK = 5;
+static const int ENC1_DT  = 6;
+static const int ENC1_SW  = 7;
+
+// Encoder2 (S1, S2, KEY) - ПЕРЕНАЗНАЧЕНЫ!
+static const int ENC2_S1  = 20;   // было 0
+static const int ENC2_S2  = 21;   // было 1
+static const int ENC2_KEY = 2;    // оставляем, для кнопки после загрузки OK
+
+// Кнопки (вентилятор) - используем освободившиеся пины
+static const int BTN_FAN_UP   = 0;   // было 3, освободили
+static const int BTN_FAN_DOWN = 1;   // было 4, освободили
+
+// Screen (I2C)
 static const int PIN_SDA = 9;
 static const int PIN_SCL = 10;
-
 
 // ================= BLE globals =================
 BLECharacteristic* g_char = nullptr;
 volatile bool g_deviceConnected = false;
-
 uint32_t g_ledUntilMs = 0;
-bool g_ledInvert = false;
+
 // ================= Display =================
-U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 
 String g_lastMsg = "-";
-long g_lastEncPos = 0;
-uint32_t g_lastSendMs = 0;
+long g_enc1Pos = 0;
+long g_enc2Pos = 0;
+int g_btn1Count = 0;
+int g_btn2Count = 0;
 
 void displayInit() {
     Wire.begin(PIN_SDA, PIN_SCL);
@@ -48,18 +58,26 @@ void displayInit() {
 void displayDraw() {
     u8g2.clearBuffer();
 
-    u8g2.setCursor(0, 12);
+    u8g2.setCursor(0, 10);
     u8g2.print("BLE: ");
     u8g2.print(g_deviceConnected ? "ON" : "OFF");
 
-    u8g2.setCursor(0, 26);
-    u8g2.print("ENC: ");
-    u8g2.print(g_lastEncPos);
+    u8g2.setCursor(0, 22);
+    u8g2.print("E1:");
+    u8g2.print(g_enc1Pos);
+    u8g2.print(" E2:");
+    u8g2.print(g_enc2Pos);
 
-    u8g2.setCursor(0, 40);
+    u8g2.setCursor(0, 34);
+    u8g2.print("B1:");
+    u8g2.print(g_btn1Count);
+    u8g2.print(" B2:");
+    u8g2.print(g_btn2Count);
+
+    u8g2.setCursor(0, 46);
     u8g2.print("LAST:");
 
-    u8g2.setCursor(0, 54);
+    u8g2.setCursor(0, 58);
     u8g2.print(g_lastMsg);
 
     u8g2.sendBuffer();
@@ -68,7 +86,6 @@ void displayDraw() {
 // ================= Helpers =================
 void bleSend(const char* msg) {
     g_lastMsg = msg;
-    g_lastSendMs = millis();
     Serial.print("SEND: ");
     Serial.println(msg);
     if (g_deviceConnected && g_char) {
@@ -77,14 +94,9 @@ void bleSend(const char* msg) {
     }
 }
 
-void blinkLED(int times) {
-    for (int i = 0; i < times; i++) {
-        digitalWrite(LED_BUILTIN, LOW);
-        delay(80);
-        digitalWrite(LED_BUILTIN, HIGH);
-        delay(80);
-    }
-    digitalWrite(LED_BUILTIN, LOW); // “горит” в твоей логике
+void ledPulse(int ms) {
+    digitalWrite(LED_BUILTIN, HIGH);
+    g_ledUntilMs = millis() + ms;
 }
 
 // ---- BLE callbacks ----
@@ -92,75 +104,108 @@ class MyServerCallbacks : public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) override {
         g_deviceConnected = true;
         Serial.println("BLE: connected");
-        blinkLED(3);
+        bleSend("EVT:BLE:CONN");
     }
     void onDisconnect(BLEServer* pServer) override {
         g_deviceConnected = false;
-        Serial.println("BLE: disconnected, advertising...");
+        Serial.println("BLE: disconnected");
         pServer->getAdvertising()->start();
     }
 };
 
-// ================= Encoder via library =================
-// Вариант с “4 шага на щелчок” для KY-040 часто удобнее.
-// Если у тебя каждый детент должен давать 1 событие — оставь 4 и дели, или поставь 2/1 по факту.
-AiEsp32RotaryEncoder encoder(PIN_CLK, PIN_DT, -1, -1, 4);
+// ================= Encoders =================
+AiEsp32RotaryEncoder enc1(ENC1_CLK, ENC1_DT, -1, -1, 4);
+AiEsp32RotaryEncoder enc2(ENC2_S1, ENC2_S2, -1, -1, 4);
 
-// Кнопка (INPUT_PULLUP, активный LOW)
-OneButton button(PIN_SW, true, true);
+OneButton enc1Btn(ENC1_SW, true, true);
+OneButton enc2Btn(ENC2_KEY, true, true);
+OneButton btnFanUp(BTN_FAN_UP, true, true);
+OneButton btnFanDown(BTN_FAN_DOWN, true, true);
 
-void IRAM_ATTR readEncoderISR() {
-    encoder.readEncoder_ISR();
+void IRAM_ATTR enc1ISR() { enc1.readEncoder_ISR(); }
+void IRAM_ATTR enc2ISR() { enc2.readEncoder_ISR(); }
+
+// ================= Callbacks =================
+void onEnc1Click() {
+    bleSend("EVT:CLIMATE_TOGGLE");
+    ledPulse(60);
 }
 
-void onButtonClick() {
-    bleSend("BTN:CLICK");
-    digitalWrite(LED_BUILTIN, HIGH);
-    g_ledUntilMs = millis() + 40;
+void onEnc2Click() {
+    bleSend("EVT:DUAL_OFF");
+    ledPulse(60);
 }
 
-void onButtonLongPressStart() {
-    bleSend("BTN:LONG");
-    digitalWrite(LED_BUILTIN, HIGH);
-    g_ledUntilMs = millis() + 200;
+void onFanUp() {
+    g_btn1Count++;
+    bleSend("EVT:FAN:+1");
+    ledPulse(30);
+}
+
+void onFanDown() {
+    g_btn2Count++;
+    bleSend("EVT:FAN:-1");
+    ledPulse(30);
 }
 
 void setup() {
     Serial.begin(115200);
-    delay(200);
+    delay(150);
 
     pinMode(LED_BUILTIN, OUTPUT);
     digitalWrite(LED_BUILTIN, LOW);
 
-    // Encoder pins
-    pinMode(PIN_CLK, INPUT_PULLUP);
-    pinMode(PIN_DT,  INPUT_PULLUP);
-    pinMode(PIN_SW,  INPUT_PULLUP);
-
-    // Encoder init
-    encoder.begin();
-    encoder.setup(readEncoderISR);
-    encoder.setAcceleration(0); // можно включить 1..n если хочешь ускорение
-    attachInterrupt(digitalPinToInterrupt(PIN_CLK), readEncoderISR, CHANGE);
-    attachInterrupt(digitalPinToInterrupt(PIN_DT),  readEncoderISR, CHANGE);
-
-    // Button init
-    button.attachClick(onButtonClick);
-    button.attachLongPressStart(onButtonLongPressStart);
-    button.setDebounceMs(30);
-    button.setPressMs(600);
-
+    // Display
     displayInit();
     g_lastMsg = "BOOT";
     displayDraw();
 
-    // ---- BLE init ----
+    // Encoder1 (KY-040)
+    pinMode(ENC1_CLK, INPUT_PULLUP);
+    pinMode(ENC1_DT, INPUT_PULLUP);
+    pinMode(ENC1_SW, INPUT_PULLUP);
+    enc1.begin();
+    enc1.setup(enc1ISR);
+    enc1.setAcceleration(0);
+    attachInterrupt(digitalPinToInterrupt(ENC1_CLK), enc1ISR, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(ENC1_DT), enc1ISR, CHANGE);
+
+    // Encoder2 (S1=20, S2=21, KEY=2)
+    pinMode(ENC2_S1, INPUT_PULLUP);
+    pinMode(ENC2_S2, INPUT_PULLUP);
+    pinMode(ENC2_KEY, INPUT_PULLUP);
+
+    Serial.print("ENC2 init: S1(20)=");
+    Serial.print(digitalRead(ENC2_S1));
+    Serial.print(" S2(21)=");
+    Serial.println(digitalRead(ENC2_S2));
+
+    enc2.begin();
+    enc2.setup(enc2ISR);
+    enc2.setAcceleration(0);
+    attachInterrupt(digitalPinToInterrupt(ENC2_S1), enc2ISR, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(ENC2_S2), enc2ISR, CHANGE);
+
+    // Кнопки вентилятора
+    pinMode(BTN_FAN_UP, INPUT_PULLUP);
+    pinMode(BTN_FAN_DOWN, INPUT_PULLUP);
+
+    enc1Btn.attachClick(onEnc1Click);
+    enc2Btn.attachClick(onEnc2Click);
+    enc1Btn.setDebounceMs(5);
+    enc2Btn.setDebounceMs(5);
+
+    btnFanUp.attachClick(onFanUp);
+    btnFanDown.attachClick(onFanDown);
+    btnFanUp.setDebounceMs(5);
+    btnFanDown.setDebounceMs(5);
+
+    // BLE
     BLEDevice::init(BLE_NAME);
     BLEServer* server = BLEDevice::createServer();
     server->setCallbacks(new MyServerCallbacks());
 
     BLEService* service = server->createService(SERVICE_UUID);
-
     g_char = service->createCharacteristic(
             CHARACTERISTIC_UUID,
             BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
@@ -176,37 +221,51 @@ void setup() {
     adv->setMinPreferred(0x12);
 
     BLEDevice::startAdvertising();
-    Serial.println("BLE: advertising started");
+    Serial.println("BLE: started");
 }
 
 void loop() {
-    // Энкодер
-    long newPos = encoder.readEncoder();
-    static long lastPos = 0;
-    long diff = newPos - lastPos;
-    g_lastEncPos = newPos;
-
-    if (diff != 0) {
-        if (diff > 0) {
-            bleSend("ENC:+1");
-            blinkLED(2);
-        } else {
-            bleSend("ENC:-1");
-            blinkLED(1);
-        }
-        lastPos = newPos;
+    // Encoder1
+    static long enc1Last = 0;
+    long p1 = enc1.readEncoder();
+    long d1 = p1 - enc1Last;
+    if (d1 != 0) {
+        Serial.print("ENC1: ");
+        Serial.println(d1);
+        bleSend(d1 > 0 ? "EVT:TEMP_MAIN:+1" : "EVT:TEMP_MAIN:-1");
+        ledPulse(40);
+        enc1Last = p1;
     }
+    g_enc1Pos = p1;
 
-    // Кнопка
-    button.tick();
+    // Encoder2
+    static long enc2Last = 0;
+    long p2 = enc2.readEncoder();
+    long d2 = p2 - enc2Last;
+    if (d2 != 0) {
+        Serial.print("ENC2: ");
+        Serial.print(d2);
+        Serial.print(" pos=");
+        Serial.println(p2);
+        bleSend(d2 > 0 ? "EVT:TEMP_PASS:+1" : "EVT:TEMP_PASS:-1");
+        ledPulse(40);
+        enc2Last = p2;
+    }
+    g_enc2Pos = p2;
 
-    // LED pulse (если используешь вариант без delay в колбэках)
+    // Кнопки
+    enc1Btn.tick();
+    enc2Btn.tick();
+    btnFanUp.tick();
+    btnFanDown.tick();
+
+    // LED pulse
     if (g_ledUntilMs != 0 && millis() > g_ledUntilMs) {
         g_ledUntilMs = 0;
         digitalWrite(LED_BUILTIN, LOW);
     }
 
-    // Экран обновляем редко
+    // Display
     static uint32_t lastUiMs = 0;
     if (millis() - lastUiMs >= 150) {
         lastUiMs = millis();
