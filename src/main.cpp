@@ -4,51 +4,95 @@
 #include <BLEUtils.h>
 #include <BLE2902.h>
 
+#include <Wire.h>
+#include <U8g2lib.h>
+#include <AiEsp32RotaryEncoder.h>
+#include <OneButton.h>
+
 // ================= BLE UUIDs =================
 static const char* BLE_NAME = "geelyController";
 static const char* SERVICE_UUID        = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
 static const char* CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
 
 // ================= Pins =================
-#define LED_BUILTIN 8  // Встроенный LED на GPIO8
-static const int PIN_CLK = 5;   // KY-040 CLK
-static const int PIN_DT  = 6;   // KY-040 DT
-static const int PIN_SW  = 7;   // KY-040 Button
+#define LED_BUILTIN 8
+// encoder1
+static const int PIN_CLK = 5;
+static const int PIN_DT  = 6;
+static const int PIN_SW  = 7;
 
-// ================= Settings =================
-static const uint32_t ENC_DEBOUNCE_US = 1000;
-static const uint32_t BTN_DEBOUNCE_MS = 30;
-static const uint32_t BTN_LONG_MS     = 600;
+// Screen
+static const int PIN_SDA = 9;
+static const int PIN_SCL = 10;
+
 
 // ================= BLE globals =================
 BLECharacteristic* g_char = nullptr;
 volatile bool g_deviceConnected = false;
 
-// ================= Encoder state =================
-volatile int8_t g_encDelta = 0;
-volatile uint32_t g_lastEncMicros = 0;
+uint32_t g_ledUntilMs = 0;
+bool g_ledInvert = false;
+// ================= Display =================
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
 
-// Button state
-bool g_btnLast = true;
-uint32_t g_btnLastChangeMs = 0;
-uint32_t g_btnPressStartMs = 0;
-bool g_btnLongSent = false;
+String g_lastMsg = "-";
+long g_lastEncPos = 0;
+uint32_t g_lastSendMs = 0;
 
-// LED indication
-bool g_ledState = false;
+void displayInit() {
+    Wire.begin(PIN_SDA, PIN_SCL);
+    u8g2.begin();
+    u8g2.setFont(u8g2_font_6x10_tf);
+}
+
+void displayDraw() {
+    u8g2.clearBuffer();
+
+    u8g2.setCursor(0, 12);
+    u8g2.print("BLE: ");
+    u8g2.print(g_deviceConnected ? "ON" : "OFF");
+
+    u8g2.setCursor(0, 26);
+    u8g2.print("ENC: ");
+    u8g2.print(g_lastEncPos);
+
+    u8g2.setCursor(0, 40);
+    u8g2.print("LAST:");
+
+    u8g2.setCursor(0, 54);
+    u8g2.print(g_lastMsg);
+
+    u8g2.sendBuffer();
+}
+
+// ================= Helpers =================
+void bleSend(const char* msg) {
+    g_lastMsg = msg;
+    g_lastSendMs = millis();
+    Serial.print("SEND: ");
+    Serial.println(msg);
+    if (g_deviceConnected && g_char) {
+        g_char->setValue((uint8_t*)msg, strlen(msg));
+        g_char->notify();
+    }
+}
+
+void blinkLED(int times) {
+    for (int i = 0; i < times; i++) {
+        digitalWrite(LED_BUILTIN, LOW);
+        delay(80);
+        digitalWrite(LED_BUILTIN, HIGH);
+        delay(80);
+    }
+    digitalWrite(LED_BUILTIN, LOW); // “горит” в твоей логике
+}
 
 // ---- BLE callbacks ----
 class MyServerCallbacks : public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) override {
         g_deviceConnected = true;
         Serial.println("BLE: connected");
-        // Быстро мигнуть 3 раза при подключении
-        for (int i = 0; i < 3; i++) {
-            digitalWrite(LED_BUILTIN, LOW);
-            delay(80);
-            digitalWrite(LED_BUILTIN, HIGH);
-            delay(80);
-        }
+        blinkLED(3);
     }
     void onDisconnect(BLEServer* pServer) override {
         g_deviceConnected = false;
@@ -57,58 +101,58 @@ class MyServerCallbacks : public BLEServerCallbacks {
     }
 };
 
-// ---- Send helper ----
-void bleSend(const char* msg) {
-    Serial.print("SEND: ");
-    Serial.println(msg);
+// ================= Encoder via library =================
+// Вариант с “4 шага на щелчок” для KY-040 часто удобнее.
+// Если у тебя каждый детент должен давать 1 событие — оставь 4 и дели, или поставь 2/1 по факту.
+AiEsp32RotaryEncoder encoder(PIN_CLK, PIN_DT, -1, -1, 4);
 
-    if (g_deviceConnected && g_char) {
-        g_char->setValue((uint8_t*)msg, strlen(msg));
-        g_char->notify();
-    }
+// Кнопка (INPUT_PULLUP, активный LOW)
+OneButton button(PIN_SW, true, true);
+
+void IRAM_ATTR readEncoderISR() {
+    encoder.readEncoder_ISR();
 }
 
-// ---- LED blink helper ----
-void blinkLED(int times) {
-    for (int i = 0; i < times; i++) {
-        digitalWrite(LED_BUILTIN, LOW);  // включить
-        delay(100);
-        digitalWrite(LED_BUILTIN, HIGH); // выключить
-        delay(100);
-    }
+void onButtonClick() {
+    bleSend("BTN:CLICK");
+    digitalWrite(LED_BUILTIN, HIGH);
+    g_ledUntilMs = millis() + 40;
 }
 
-// ---- Encoder ISR ----
-void IRAM_ATTR onClkChange() {
-    uint32_t now = micros();
-    if (now - g_lastEncMicros < ENC_DEBOUNCE_US) return;
-    g_lastEncMicros = now;
-
-    int clk = digitalRead(PIN_CLK);
-    int dt  = digitalRead(PIN_DT);
-
-    // Исправление volatile warnings
-    if (dt != clk) {
-        g_encDelta = g_encDelta + 1;
-    } else {
-        g_encDelta = g_encDelta - 1;
-    }
+void onButtonLongPressStart() {
+    bleSend("BTN:LONG");
+    digitalWrite(LED_BUILTIN, HIGH);
+    g_ledUntilMs = millis() + 200;
 }
 
 void setup() {
     Serial.begin(115200);
     delay(200);
 
-    // LED setup
     pinMode(LED_BUILTIN, OUTPUT);
-    digitalWrite(LED_BUILTIN, LOW); // включить при старте
+    digitalWrite(LED_BUILTIN, LOW);
 
     // Encoder pins
     pinMode(PIN_CLK, INPUT_PULLUP);
     pinMode(PIN_DT,  INPUT_PULLUP);
     pinMode(PIN_SW,  INPUT_PULLUP);
 
-    attachInterrupt(digitalPinToInterrupt(PIN_CLK), onClkChange, CHANGE);
+    // Encoder init
+    encoder.begin();
+    encoder.setup(readEncoderISR);
+    encoder.setAcceleration(0); // можно включить 1..n если хочешь ускорение
+    attachInterrupt(digitalPinToInterrupt(PIN_CLK), readEncoderISR, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(PIN_DT),  readEncoderISR, CHANGE);
+
+    // Button init
+    button.attachClick(onButtonClick);
+    button.attachLongPressStart(onButtonLongPressStart);
+    button.setDebounceMs(30);
+    button.setPressMs(600);
+
+    displayInit();
+    g_lastMsg = "BOOT";
+    displayDraw();
 
     // ---- BLE init ----
     BLEDevice::init(BLE_NAME);
@@ -121,7 +165,6 @@ void setup() {
             CHARACTERISTIC_UUID,
             BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
     );
-
     g_char->addDescriptor(new BLE2902());
 
     service->start();
@@ -134,67 +177,41 @@ void setup() {
 
     BLEDevice::startAdvertising();
     Serial.println("BLE: advertising started");
-
-    // LED горит = готов к работе
-    digitalWrite(LED_BUILTIN, LOW);
 }
 
 void loop() {
-    // ---- Consume encoder delta ----
-    int8_t delta = 0;
-    noInterrupts();
-    delta = g_encDelta;
-    g_encDelta = 0;
-    interrupts();
+    // Энкодер
+    long newPos = encoder.readEncoder();
+    static long lastPos = 0;
+    long diff = newPos - lastPos;
+    g_lastEncPos = newPos;
 
-    if (delta != 0) {
-        if (delta > 0) {
+    if (diff != 0) {
+        if (diff > 0) {
             bleSend("ENC:+1");
-            blinkLED(2); // 2 раза = вправо
+            blinkLED(2);
         } else {
             bleSend("ENC:-1");
-            blinkLED(1); // 1 раз = влево
+            blinkLED(1);
         }
-        // Возвращаем LED в состояние "горит"
+        lastPos = newPos;
+    }
+
+    // Кнопка
+    button.tick();
+
+    // LED pulse (если используешь вариант без delay в колбэках)
+    if (g_ledUntilMs != 0 && millis() > g_ledUntilMs) {
+        g_ledUntilMs = 0;
         digitalWrite(LED_BUILTIN, LOW);
     }
 
-    // ---- Button handling ----
-    bool btn = digitalRead(PIN_SW);
-    uint32_t nowMs = millis();
-
-    if (btn != g_btnLast) {
-        if (nowMs - g_btnLastChangeMs > BTN_DEBOUNCE_MS) {
-            g_btnLastChangeMs = nowMs;
-            g_btnLast = btn;
-
-            if (btn == LOW) {
-                g_btnPressStartMs = nowMs;
-                g_btnLongSent = false;
-            } else {
-                uint32_t held = nowMs - g_btnPressStartMs;
-                if (!g_btnLongSent && held < BTN_LONG_MS) {
-                    bleSend("BTN:CLICK");
-                    // Короткая вспышка на клик
-                    digitalWrite(LED_BUILTIN, HIGH);
-                    delay(50);
-                    digitalWrite(LED_BUILTIN, LOW);
-                }
-            }
-        }
+    // Экран обновляем редко
+    static uint32_t lastUiMs = 0;
+    if (millis() - lastUiMs >= 150) {
+        lastUiMs = millis();
+        displayDraw();
     }
 
-    // long press
-    if (g_btnLast == LOW && !g_btnLongSent) {
-        if (nowMs - g_btnPressStartMs >= BTN_LONG_MS) {
-            g_btnLongSent = true;
-            bleSend("BTN:LONG");
-            // Длинная вспышка на long press
-            digitalWrite(LED_BUILTIN, HIGH);
-            delay(200);
-            digitalWrite(LED_BUILTIN, LOW);
-        }
-    }
-
-    delay(5);
+    delay(2);
 }
