@@ -1,7 +1,6 @@
 #include <Arduino.h>
 #include <BLEDevice.h>
 #include <BLEServer.h>
-#include <BLEUtils.h>
 #include <BLE2902.h>
 
 #include <Wire.h>
@@ -9,38 +8,38 @@
 #include <AiEsp32RotaryEncoder.h>
 #include <OneButton.h>
 
-// ================= BLE UUIDs =================
+// BLE UUIDs
 static const char* BLE_NAME = "geelyController";
 static const char* SERVICE_UUID        = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
 static const char* CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
 
-// ================= Pins (ESP32-C3 Super Mini) =================
+// Pins (ESP32-C3 Super Mini)
 #define LED_BUILTIN 8
 
-// Encoder1 (KY-040: CLK, DT, SW)
+// Encoder1 (KY-040: CLK, DT, SW) (main temp)
 static const int ENC1_CLK = 5;
 static const int ENC1_DT  = 6;
 static const int ENC1_SW  = 7;
 
-// Encoder2 (S1, S2, KEY) - ПЕРЕНАЗНАЧЕНЫ!
-static const int ENC2_S1  = 20;   // было 0
-static const int ENC2_S2  = 21;   // было 1
-static const int ENC2_KEY = 2;    // оставляем, для кнопки после загрузки OK
+// Encoder2 (S1, S2, KEY) (pass temp)
+static const int ENC2_S1  = 20;
+static const int ENC2_S2  = 21;
+static const int ENC2_KEY = 2;
 
-// Кнопки (вентилятор) - используем освободившиеся пины
-static const int BTN_FAN_UP   = 0;   // было 3, освободили
-static const int BTN_FAN_DOWN = 1;   // было 4, освободили
+// Buttons (fan speed)
+static const int BTN_FAN_UP   = 0;
+static const int BTN_FAN_DOWN = 1;
 
 // Screen (I2C)
 static const int PIN_SDA = 9;
 static const int PIN_SCL = 10;
 
-// ================= BLE globals =================
+// BLE globals
 BLECharacteristic* g_char = nullptr;
 volatile bool g_deviceConnected = false;
 uint32_t g_ledUntilMs = 0;
 
-// ================= Display =================
+// Display
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 
 String g_lastMsg = "-";
@@ -83,7 +82,7 @@ void displayDraw() {
     u8g2.sendBuffer();
 }
 
-// ================= Helpers =================
+// Helpers
 void bleSend(const char* msg) {
     g_lastMsg = msg;
     Serial.print("SEND: ");
@@ -99,7 +98,7 @@ void ledPulse(int ms) {
     g_ledUntilMs = millis() + ms;
 }
 
-// ---- BLE callbacks ----
+// BLE callbacks
 class MyServerCallbacks : public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) override {
         g_deviceConnected = true;
@@ -113,7 +112,7 @@ class MyServerCallbacks : public BLEServerCallbacks {
     }
 };
 
-// ================= Encoders =================
+// Encoders
 AiEsp32RotaryEncoder enc1(ENC1_CLK, ENC1_DT, -1, -1, 4);
 AiEsp32RotaryEncoder enc2(ENC2_S1, ENC2_S2, -1, -1, 4);
 
@@ -125,24 +124,40 @@ OneButton btnFanDown(BTN_FAN_DOWN, true, true);
 void IRAM_ATTR enc1ISR() { enc1.readEncoder_ISR(); }
 void IRAM_ATTR enc2ISR() { enc2.readEncoder_ISR(); }
 
-// ================= Callbacks =================
+// Callbacks
 void onEnc1Click() {
-    bleSend("EVT:CLIMATE_TOGGLE");
+    // climate on/off
+    bleSend("EVT:ENC1CLK");
+    ledPulse(60);
+}
+
+void onEnc1Long() {
+    // dual mode
+    bleSend("EVT:ENC1LONG");
     ledPulse(60);
 }
 
 void onEnc2Click() {
-    bleSend("EVT:DUAL_OFF");
+    // rear defrost
+    bleSend("EVT:REAR_DEFROST");
+    ledPulse(60);
+}
+
+void onEnc2Long() {
+    // front defrost
+    bleSend("EVT:ELECTRIC_DEFROST");
     ledPulse(60);
 }
 
 void onFanUp() {
+    // fan speed
     g_btn1Count++;
     bleSend("EVT:FAN:+1");
     ledPulse(30);
 }
 
 void onFanDown() {
+    // fan speed
     g_btn2Count++;
     bleSend("EVT:FAN:-1");
     ledPulse(30);
@@ -191,7 +206,11 @@ void setup() {
     pinMode(BTN_FAN_DOWN, INPUT_PULLUP);
 
     enc1Btn.attachClick(onEnc1Click);
+    enc1Btn.attachLongPressStart(onEnc1Long);
+
     enc2Btn.attachClick(onEnc2Click);
+    enc2Btn.attachLongPressStart(onEnc2Long);
+
     enc1Btn.setDebounceMs(5);
     enc2Btn.setDebounceMs(5);
 
