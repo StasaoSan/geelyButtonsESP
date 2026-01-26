@@ -30,6 +30,11 @@ static const int ENC2_KEY = 2;
 static const int BTN_FAN_UP   = 0;
 static const int BTN_FAN_DOWN = 1;
 
+// Extra buttons
+static const int BTN_3 = 3;
+static const int BTN_4 = 4;
+static const int BTN_8 = 8;
+
 // Screen (I2C)
 static const int PIN_SDA = 9;
 static const int PIN_SCL = 10;
@@ -47,6 +52,13 @@ long g_enc1Pos = 0;
 long g_enc2Pos = 0;
 int g_btn1Count = 0;
 int g_btn2Count = 0;
+int g_btn3Count = 0;
+int g_btn4Count = 0;
+int g_btn8Count = 0;
+
+// If BTN_8 shares the same GPIO as the onboard LED, disable LED pulses to avoid conflicts.
+static const int LED_PIN = LED_BUILTIN;
+static const bool LED_ENABLED = false; // BTN_8 != LED_PIN
 
 void displayInit() {
     Wire.begin(PIN_SDA, PIN_SCL);
@@ -68,15 +80,21 @@ void displayDraw() {
     u8g2.print(g_enc2Pos);
 
     u8g2.setCursor(0, 34);
-    u8g2.print("B1:");
+    u8g2.print("F+:");
     u8g2.print(g_btn1Count);
-    u8g2.print(" B2:");
+    u8g2.print(" F-:");
     u8g2.print(g_btn2Count);
 
     u8g2.setCursor(0, 46);
-    u8g2.print("LAST:");
+    u8g2.print("B3:");
+    u8g2.print(g_btn3Count);
+    u8g2.print(" B4:");
+    u8g2.print(g_btn4Count);
+    u8g2.print(" B8:");
+    u8g2.print(g_btn8Count);
 
     u8g2.setCursor(0, 58);
+    u8g2.print("LAST:");
     u8g2.print(g_lastMsg);
 
     u8g2.sendBuffer();
@@ -94,7 +112,8 @@ void bleSend(const char* msg) {
 }
 
 void ledPulse(int ms) {
-    digitalWrite(LED_BUILTIN, HIGH);
+    if (!LED_ENABLED) return;
+    digitalWrite(LED_PIN, HIGH);
     g_ledUntilMs = millis() + ms;
 }
 
@@ -120,6 +139,10 @@ OneButton enc1Btn(ENC1_SW, true, true);
 OneButton enc2Btn(ENC2_KEY, true, true);
 OneButton btnFanUp(BTN_FAN_UP, true, true);
 OneButton btnFanDown(BTN_FAN_DOWN, true, true);
+
+OneButton btn3(BTN_3, true, true);
+OneButton btn4(BTN_4, true, true);
+OneButton btn8(BTN_8, true, true);
 
 void IRAM_ATTR enc1ISR() { enc1.readEncoder_ISR(); }
 void IRAM_ATTR enc2ISR() { enc2.readEncoder_ISR(); }
@@ -163,12 +186,47 @@ void onFanDown() {
     ledPulse(30);
 }
 
+void onBtn3Click() {
+    g_btn3Count++;
+    bleSend("EVT:BTN3:CLICK");
+    ledPulse(30);
+}
+
+void onBtn4Click() {
+    g_btn4Count++;
+    bleSend("EVT:BTN4:CLICK");
+    ledPulse(30);
+}
+
+void onBtn8Click() {
+    g_btn8Count++;
+    bleSend("EVT:BTN8:CLICK");
+    ledPulse(30);
+}
+
+void onBtn3Long() {
+    bleSend("EVT:BTN3:LONG");
+    ledPulse(60);
+}
+
+void onBtn4Long() {
+    bleSend("EVT:BTN4:LONG");
+    ledPulse(60);
+}
+
+void onBtn8Long() {
+    bleSend("EVT:BTN8:LONG");
+    ledPulse(60);
+}
+
 void setup() {
     Serial.begin(115200);
     delay(150);
 
-    pinMode(LED_BUILTIN, OUTPUT);
-    digitalWrite(LED_BUILTIN, LOW);
+    if (LED_ENABLED) {
+        pinMode(LED_PIN, OUTPUT);
+        digitalWrite(LED_PIN, LOW);
+    }
 
     // Display
     displayInit();
@@ -205,6 +263,11 @@ void setup() {
     pinMode(BTN_FAN_UP, INPUT_PULLUP);
     pinMode(BTN_FAN_DOWN, INPUT_PULLUP);
 
+    // Extra buttons
+    pinMode(BTN_3, INPUT_PULLUP);
+    pinMode(BTN_4, INPUT_PULLUP);
+    pinMode(BTN_8, INPUT_PULLUP);
+
     enc1Btn.attachClick(onEnc1Click);
     enc1Btn.attachLongPressStart(onEnc1Long);
 
@@ -218,6 +281,18 @@ void setup() {
     btnFanDown.attachClick(onFanDown);
     btnFanUp.setDebounceMs(5);
     btnFanDown.setDebounceMs(5);
+
+    btn3.attachClick(onBtn3Click);
+    btn4.attachClick(onBtn4Click);
+    btn8.attachClick(onBtn8Click);
+
+    btn3.attachLongPressStart(onBtn3Long);
+    btn4.attachLongPressStart(onBtn4Long);
+    btn8.attachLongPressStart(onBtn8Long);
+
+    btn3.setDebounceMs(5);
+    btn4.setDebounceMs(5);
+    btn8.setDebounceMs(5);
 
     // BLE
     BLEDevice::init(BLE_NAME);
@@ -277,11 +352,14 @@ void loop() {
     enc2Btn.tick();
     btnFanUp.tick();
     btnFanDown.tick();
+    btn3.tick();
+    btn4.tick();
+    btn8.tick();
 
     // LED pulse
-    if (g_ledUntilMs != 0 && millis() > g_ledUntilMs) {
+    if (LED_ENABLED && g_ledUntilMs != 0 && millis() > g_ledUntilMs) {
         g_ledUntilMs = 0;
-        digitalWrite(LED_BUILTIN, LOW);
+        digitalWrite(LED_PIN, LOW);
     }
 
     // Display
