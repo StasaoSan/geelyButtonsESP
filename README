@@ -1,5 +1,5 @@
 
-Actions:
+Actions (old):
 	•	EVT:TEMP_MAIN:+1
 	•	EVT:TEMP_MAIN:-1
 	•	EVT:CLIMATE_TOGGLE
