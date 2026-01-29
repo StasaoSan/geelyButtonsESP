@@ -2,7 +2,7 @@
 #include <SPI.h>
 #include <Wire.h>
 
-#include <Adafruit_GFX.h>
+#include <AiEsp32RotaryEncoder.h>
 #include <Adafruit_GC9A01A.h>
 #include <Adafruit_SSD1306.h>
 
@@ -91,8 +91,9 @@ Adafruit_SSD1306 oled(128, 64, &Wire, -1);
 #define MUX_S3  19
 #define MUX_EN  5  // active LOW
 
-static const uint8_t BTN_FIRST_CH = 4;   // начинаем с C4
-static const uint8_t BTN_COUNT    = 12;
+
+static const uint8_t BTN_FIRST_CH = 1;
+static const uint8_t BTN_COUNT    = 15;
 
 static const uint16_t BTN_DEBOUNCE_MS = 30;
 
@@ -110,6 +111,26 @@ static inline bool readButtonPressedByIndex(uint8_t idx) {
     return digitalRead(MUX_SIG) == LOW;
 }
 
+// ===== Encoders A/B pins =====
+#define ENC1_A 23
+#define ENC1_B 4
+
+#define ENC2_A 2
+#define ENC2_B 15
+
+// Buttons for encoder keys via MUX channels:
+static const uint8_t ENC1_KEY_CH = 1;
+static const uint8_t ENC2_KEY_CH = 2;
+
+AiEsp32RotaryEncoder enc1(ENC1_A, ENC1_B, -1, -1, 4);
+AiEsp32RotaryEncoder enc2(ENC2_A, ENC2_B, -1, -1, 4);
+
+static uint32_t encKeyDownMs[2] = {0, 0};
+static bool encKeyWasDown[2] = {false, false};
+static const uint16_t ENC_KEY_LONG_MS = 450;
+
+void IRAM_ATTR enc1ISR() { enc1.readEncoder_ISR(); }
+void IRAM_ATTR enc2ISR() { enc2.readEncoder_ISR(); }
 
 // ===================== Simple UI helpers =====================
 static void tftText(int16_t x, int16_t y, uint8_t size, uint16_t color, const char* s) {
@@ -217,7 +238,7 @@ static void scanButtons() {
     uint32_t now = millis();
 
     for (uint8_t ch = 0; ch < BTN_COUNT; ch++) {
-        bool r = readButtonPressed(ch);
+        bool r = readButtonPressedByIndex(ch);
 
         if (r != rawState[ch]) {
             rawState[ch] = r;
@@ -230,13 +251,58 @@ static void scanButtons() {
 
                 char msg[LOG_LEN];
                 // Формат событий — под BLE тоже
-                snprintf(msg, sizeof(msg), "EVT:BTN:%u:%s", ch, stableState[ch] ? "DOWN" : "UP");
+                uint8_t physicalCh = BTN_FIRST_CH + ch;
+                snprintf(msg, sizeof(msg), "EVT:BTN:C%u:%s",
+                         (unsigned)physicalCh,
+                         stableState[ch] ? "DOWN" : "UP");
                 logPush(msg);
             }
         }
     }
 }
 
+static long enc1Last = 0;
+static long enc2Last = 0;
+
+static void handleEncoders() {
+    long p1 = enc1.readEncoder();
+    long d1 = p1 - enc1Last;
+    if (d1 != 0) {
+        enc1Last = p1;
+        logPush(d1 > 0 ? "EVT:ENC1:+1" : "EVT:ENC1:-1");
+    }
+
+    long p2 = enc2.readEncoder();
+    long d2 = p2 - enc2Last;
+    if (d2 != 0) {
+        enc2Last = p2;
+        logPush(d2 > 0 ? "EVT:ENC2:+1" : "EVT:ENC2:-1");
+    }
+}
+
+static void handleEncoderKeysFromMux() {
+    // pressed = true/false
+    bool k1 = readButtonPressedByIndex(ENC1_KEY_CH);
+    bool k2 = readButtonPressedByIndex(ENC2_KEY_CH);
+
+    bool keys[2] = {k1, k2};
+
+    for (int i = 0; i < 2; i++) {
+        if (keys[i] && !encKeyWasDown[i]) {
+            encKeyWasDown[i] = true;
+            encKeyDownMs[i] = millis();
+        } else if (!keys[i] && encKeyWasDown[i]) {
+            encKeyWasDown[i] = false;
+            uint32_t dur = millis() - encKeyDownMs[i];
+
+            if (dur >= ENC_KEY_LONG_MS) {
+                logPush(i == 0 ? "EVT:ENC1:LONG" : "EVT:ENC2:LONG");
+            } else {
+                logPush(i == 0 ? "EVT:ENC1:CLICK" : "EVT:ENC2:CLICK");
+            }
+        }
+    }
+}
 // ===================== Touch logging (DOWN/XY/UP) =====================
 static bool touchDown = false;
 static uint32_t lastTouchEventMs = 0;
@@ -354,10 +420,28 @@ void setup() {
 
     uint32_t now = millis();
     for (uint8_t ch = 0; ch < BTN_COUNT; ch++) {
-        rawState[ch] = readButtonPressed(ch);
+        rawState[ch] = readButtonPressedByIndex(ch);
         stableState[ch] = rawState[ch];
         lastChangeMs[ch] = now;
     }
+
+    // Encoders init
+    pinMode(ENC1_A, INPUT_PULLUP);
+    pinMode(ENC1_B, INPUT_PULLUP);
+    pinMode(ENC2_A, INPUT_PULLUP);
+    pinMode(ENC2_B, INPUT_PULLUP);
+
+    enc1.begin();
+    enc1.setAcceleration(0);
+
+    enc2.begin();
+    enc2.setAcceleration(0);
+
+    attachInterrupt(digitalPinToInterrupt(ENC1_A), enc1ISR, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(ENC1_B), enc1ISR, CHANGE);
+
+    attachInterrupt(digitalPinToInterrupt(ENC2_A), enc2ISR, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(ENC2_B), enc2ISR, CHANGE);
 
     // BLE
     bleInit();
@@ -377,14 +461,12 @@ void setup() {
     logPush("EVT:READY");
 }
 
+
 void loop() {
-    // 1) кнопки
-    scanButtons();
-
-    // 2) тач + рисование + логи
+    scanButtons();            // остальные кнопки через MUX
+    handleEncoderKeysFromMux(); // KEY1/KEY2 (клик/лонг)
+    handleEncoders();         // вращение ENC1/ENC2
     handleTouch();
-
-    // 3) OLED перерисовываем только при изменении логов
     oledRender();
 
     delay(2);
