@@ -1,5 +1,5 @@
 #include "CircleText.h"
-#include <math.h>
+#include <cmath>
 
 static CircleTextConfig g_cfg;
 
@@ -287,8 +287,4 @@ static void drawWrappedTextCircle(Adafruit_GFX& gfx,
 
 void CircleText::drawWithConfig(Adafruit_GFX& gfx, const CircleTextConfig& cfg, const char* text, CircleTextPos pos) {
     drawWrappedTextCircle(gfx, cfg, text, pos);
-}
-
-void CircleText::draw(Adafruit_GFX& gfx, const char* text, CircleTextPos pos) {
-    drawWrappedTextCircle(gfx, g_cfg, text, pos);
 }

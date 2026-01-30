@@ -27,7 +27,5 @@ struct CircleTextConfig {
 namespace CircleText {
     void setConfig(const CircleTextConfig& cfg);
 
-    void draw(Adafruit_GFX& gfx, const char* text, CircleTextPos pos = CircleTextPos::Top);
-
     void drawWithConfig(Adafruit_GFX& gfx, const CircleTextConfig& cfg, const char* text, CircleTextPos pos = CircleTextPos::Top);
 }

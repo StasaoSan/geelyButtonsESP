@@ -12,16 +12,16 @@
 #include <BLEServer.h>
 #include <BLE2902.h>
 
-// ===================== BLE =====================
-static const char* BLE_NAME = "geelyController";
-static const char* SERVICE_UUID        = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
-static const char* CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
+#include "AppConfig.h"
+#include "CircleText.h"
 
+// ===================== BLE =====================
 BLECharacteristic* g_char = nullptr;
 volatile bool g_deviceConnected = false;
 
 class MyServerCallbacks : public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) override {
+        (void)pServer;
         g_deviceConnected = true;
     }
     void onDisconnect(BLEServer* pServer) override {
@@ -38,14 +38,14 @@ static inline void bleSend(const char* msg) {
 }
 
 static void bleInit() {
-    BLEDevice::init(BLE_NAME);
+    BLEDevice::init(Cfg::BLE_NAME);
 
     BLEServer* server = BLEDevice::createServer();
     server->setCallbacks(new MyServerCallbacks());
 
-    BLEService* service = server->createService(SERVICE_UUID);
+    BLEService* service = server->createService(Cfg::SERVICE_UUID);
     g_char = service->createCharacteristic(
-            CHARACTERISTIC_UUID,
+            Cfg::CHARACTERISTIC_UUID,
             BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
     );
     g_char->addDescriptor(new BLE2902());
@@ -53,7 +53,7 @@ static void bleInit() {
     service->start();
 
     BLEAdvertising* adv = BLEDevice::getAdvertising();
-    adv->addServiceUUID(SERVICE_UUID);
+    adv->addServiceUUID(Cfg::SERVICE_UUID);
     adv->setScanResponse(true);
     adv->setMinPreferred(0x06);
     adv->setMinPreferred(0x12);
@@ -61,73 +61,37 @@ static void bleInit() {
     BLEDevice::startAdvertising();
 }
 
-// ===================== TFT (GC9A01 SPI) =====================
-#define TFT_SCL  13
-#define TFT_SDA  14
-#define TFT_CS   26
-#define TFT_DC   27
-#define TFT_RST  25
+// ===================== Hardware instances =====================
+Adafruit_GC9A01A tft(Pins::TFT_CS, Pins::TFT_DC, Pins::TFT_RST);
 
-Adafruit_GC9A01A tft(TFT_CS, TFT_DC, TFT_RST);
+// CST816S ctor: (sda, scl, rst, int)
+CST816S touch(Pins::I2C_SDA, Pins::I2C_SCL, Pins::TP_RST, Pins::TP_INT);
 
-// ===================== TOUCH (CST816S I2C) =====================
-#define TP_SDA 21
-#define TP_SCL 22
-#define TP_RST 32
-#define TP_INT 34
-
-CST816S touch(TP_SDA, TP_SCL, TP_RST, TP_INT);
-
-// ===================== OLED (I2C 128x64) =====================
 static bool oledOk = false;
 static uint8_t oledAddr = 0x3C;
-Adafruit_SSD1306 oled(128, 64, &Wire, -1);
+Adafruit_SSD1306 oled(OledCfg::W, OledCfg::H, &Wire, -1);
 
-// ===================== 4067 MUX (buttons) =====================
-#define MUX_SIG 33
-#define MUX_S0  16
-#define MUX_S1  17
-#define MUX_S2  18
-#define MUX_S3  19
-#define MUX_EN  5  // active LOW
-
-
-static const uint8_t BTN_FIRST_CH = 1;
-static const uint8_t BTN_COUNT    = 15;
-
-static const uint16_t BTN_DEBOUNCE_MS = 30;
-
+// ===================== 4067 MUX helpers =====================
 static inline void muxSelect(uint8_t ch) {
-    digitalWrite(MUX_S0, (ch >> 0) & 1);
-    digitalWrite(MUX_S1, (ch >> 1) & 1);
-    digitalWrite(MUX_S2, (ch >> 2) & 1);
-    digitalWrite(MUX_S3, (ch >> 3) & 1);
+    digitalWrite(Pins::MUX_S0, (ch >> 0) & 1);
+    digitalWrite(Pins::MUX_S1, (ch >> 1) & 1);
+    digitalWrite(Pins::MUX_S2, (ch >> 2) & 1);
+    digitalWrite(Pins::MUX_S3, (ch >> 3) & 1);
 }
 
 static inline bool readButtonPressedByIndex(uint8_t idx) {
-    uint8_t ch = BTN_FIRST_CH + idx;
+    uint8_t ch = BtnCfg::BTN_FIRST_CH + idx;
     muxSelect(ch);
     delayMicroseconds(8);
-    return digitalRead(MUX_SIG) == LOW;
+    return digitalRead(Pins::MUX_SIG) == LOW;
 }
 
-// ===== Encoders A/B pins =====
-#define ENC1_A 23
-#define ENC1_B 4
-
-#define ENC2_A 2
-#define ENC2_B 15
-
-// Buttons for encoder keys via MUX channels:
-static const uint8_t ENC1_KEY_CH = 1;
-static const uint8_t ENC2_KEY_CH = 2;
-
-AiEsp32RotaryEncoder enc1(ENC1_A, ENC1_B, -1, -1, 4);
-AiEsp32RotaryEncoder enc2(ENC2_A, ENC2_B, -1, -1, 4);
+// ===================== Encoders =====================
+AiEsp32RotaryEncoder enc1(Pins::ENC1_A, Pins::ENC1_B, -1, -1, 4);
+AiEsp32RotaryEncoder enc2(Pins::ENC2_A, Pins::ENC2_B, -1, -1, 4);
 
 static uint32_t encKeyDownMs[2] = {0, 0};
 static bool encKeyWasDown[2] = {false, false};
-static const uint16_t ENC_KEY_LONG_MS = 450;
 
 void IRAM_ATTR enc1ISR() { enc1.readEncoder_ISR(); }
 void IRAM_ATTR enc2ISR() { enc2.readEncoder_ISR(); }
@@ -140,47 +104,41 @@ static void tftText(int16_t x, int16_t y, uint8_t size, uint16_t color, const ch
     tft.print(s);
 }
 
-static void tftTopStatus(const char* s) {
-    tft.fillRect(0, 0, 240, 34, GC9A01A_BLACK);
-    tft.setTextWrap(true);
-    tft.setTextSize(2);
-    tft.setTextColor(GC9A01A_WHITE);
-    tft.setCursor(6, 8);
-    tft.print(s);
+static void tftStatusCircle(const char* s) {
+    // чистим верхнюю область (прямоугольник) — быстро и достаточно
+    auto cfg = TftTextCfg::Status();
+    tft.fillRect(0, cfg.topY, 240, (cfg.bottomY - cfg.topY + 1), GC9A01A_BLACK);
+
+    // Важно: чтобы GFX сам не переносил, переносим только через CircleText
+    tft.setTextWrap(false);
+
+    CircleText::drawWithConfig(tft, cfg, s, CircleTextPos::Top);
 }
 
-static void tftBottomXY(int16_t x, int16_t y) {
-    tft.fillRect(0, 200, 240, 40, GC9A01A_BLACK);
-    tft.setTextSize(2);
-    tft.setTextColor(GC9A01A_WHITE);
-    tft.setCursor(10, 210);
-    tft.print("X:");
-    tft.print(x);
-    tft.print(" Y:");
-    tft.print(y);
+static void tftBottomCircleXY(int16_t x, int16_t y) {
+    auto cfg = TftTextCfg::Bottom();
+    tft.fillRect(0, cfg.topY, 240, (cfg.bottomY - cfg.topY + 1), GC9A01A_BLACK);
+
+    char buf[64];
+    snprintf(buf, sizeof(buf), "X:%d  Y:%d", x, y);
+
+    tft.setTextWrap(false);
+    CircleText::drawWithConfig(tft, cfg, buf, CircleTextPos::Bottom);
 }
 
-// ===================== Logger (OLED + TFT + Serial + BLE) =====================
-// На OLED оставим 1 строку под статус, значит логов 7 строк.
-static const uint8_t LOG_LINES = 7;
-static const uint8_t LOG_LEN   = 32;
-
-static char logBuf[LOG_LINES][LOG_LEN];
+// ===================== Logger =====================
+static char logBuf[LogCfg::LINES][LogCfg::LEN];
 static uint8_t logHead = 0;
 static bool logDirty = true;
 
 static void logPush(const char* msg) {
-    // сохранить
-    strncpy(logBuf[logHead], msg, LOG_LEN - 1);
-    logBuf[logHead][LOG_LEN - 1] = '\0';
-    logHead = (logHead + 1) % LOG_LINES;
+    strncpy(logBuf[logHead], msg, LogCfg::LEN - 1);
+    logBuf[logHead][LogCfg::LEN - 1] = '\0';
+    logHead = (logHead + 1) % LogCfg::LINES;
     logDirty = true;
 
-    // вывести
     Serial.println(msg);
-    tftTopStatus(msg);
-
-    // отправить в BLE (один источник правды)
+    tftStatusCircle(msg);
     bleSend(msg);
 }
 
@@ -191,16 +149,13 @@ static void oledRender() {
     oled.setTextSize(1);
     oled.setTextColor(SSD1306_WHITE);
 
-    // 0-я строка: статус
     oled.setCursor(0, 0);
     oled.print("BLE:");
     oled.print(g_deviceConnected ? "ON " : "OFF");
-    oled.print(" I2C:");
-    oled.print("OK");
+    oled.print(" I2C:OK");
 
-    // 7 строк логов
-    for (uint8_t i = 0; i < LOG_LINES; i++) {
-        uint8_t idx = (logHead + i) % LOG_LINES;
+    for (uint8_t i = 0; i < LogCfg::LINES; i++) {
+        uint8_t idx = (logHead + i) % LogCfg::LINES;
         oled.setCursor(0, 8 + i * 8);
         oled.print(logBuf[idx]);
     }
@@ -230,37 +185,39 @@ static bool hasAddr(uint8_t a) {
 }
 
 // ===================== Buttons debounce =====================
-static bool rawState[BTN_COUNT];
-static bool stableState[BTN_COUNT];
-static uint32_t lastChangeMs[BTN_COUNT];
+static bool rawState[BtnCfg::BTN_COUNT];
+static bool stableState[BtnCfg::BTN_COUNT];
+static uint32_t lastChangeMs[BtnCfg::BTN_COUNT];
 
 static void scanButtons() {
     uint32_t now = millis();
 
-    for (uint8_t ch = 0; ch < BTN_COUNT; ch++) {
-        bool r = readButtonPressedByIndex(ch);
-
-        if (r != rawState[ch]) {
-            rawState[ch] = r;
-            lastChangeMs[ch] = now;
+    for (uint8_t idx = 0; idx < BtnCfg::BTN_COUNT; idx++) {
+        if (idx == BtnCfg::ENC1_KEY_IDX || idx == BtnCfg::ENC2_KEY_IDX) {
+            continue;
         }
 
-        if ((now - lastChangeMs[ch]) >= BTN_DEBOUNCE_MS) {
-            if (stableState[ch] != rawState[ch]) {
-                stableState[ch] = rawState[ch];
+        bool r = readButtonPressedByIndex(idx);
 
-                char msg[LOG_LEN];
-                // Формат событий — под BLE тоже
-                uint8_t physicalCh = BTN_FIRST_CH + ch;
-                snprintf(msg, sizeof(msg), "EVT:BTN:C%u:%s",
-                         (unsigned)physicalCh,
-                         stableState[ch] ? "DOWN" : "UP");
-                logPush(msg);
+        if (r != rawState[idx]) {
+            rawState[idx] = r;
+            lastChangeMs[idx] = now;
+        }
+
+        if ((now - lastChangeMs[idx]) >= BtnCfg::DEBOUNCE_MS) {
+            if (stableState[idx] != rawState[idx]) {
+                bool prev = stableState[idx];
+                stableState[idx] = rawState[idx];
+
+                if (!prev && stableState[idx]) {
+                    logPush(Evt::btnClickByIdx(idx));
+                }
             }
         }
     }
 }
 
+// ===================== Encoders handling =====================
 static long enc1Last = 0;
 static long enc2Last = 0;
 
@@ -269,22 +226,20 @@ static void handleEncoders() {
     long d1 = p1 - enc1Last;
     if (d1 != 0) {
         enc1Last = p1;
-        logPush(d1 > 0 ? "EVT:ENC1:+1" : "EVT:ENC1:-1");
+        logPush(Evt::encStep(1, d1));
     }
 
     long p2 = enc2.readEncoder();
     long d2 = p2 - enc2Last;
     if (d2 != 0) {
         enc2Last = p2;
-        logPush(d2 > 0 ? "EVT:ENC2:+1" : "EVT:ENC2:-1");
+        logPush(Evt::encStep(2, d2));
     }
 }
 
 static void handleEncoderKeysFromMux() {
-    // pressed = true/false
-    bool k1 = readButtonPressedByIndex(ENC1_KEY_CH);
-    bool k2 = readButtonPressedByIndex(ENC2_KEY_CH);
-
+    bool k1 = readButtonPressedByIndex(BtnCfg::ENC1_KEY_IDX);
+    bool k2 = readButtonPressedByIndex(BtnCfg::ENC2_KEY_IDX);
     bool keys[2] = {k1, k2};
 
     for (int i = 0; i < 2; i++) {
@@ -294,32 +249,24 @@ static void handleEncoderKeysFromMux() {
         } else if (!keys[i] && encKeyWasDown[i]) {
             encKeyWasDown[i] = false;
             uint32_t dur = millis() - encKeyDownMs[i];
-
-            if (dur >= ENC_KEY_LONG_MS) {
-                logPush(i == 0 ? "EVT:ENC1:LONG" : "EVT:ENC2:LONG");
-            } else {
-                logPush(i == 0 ? "EVT:ENC1:CLICK" : "EVT:ENC2:CLICK");
-            }
+            bool isLong = (dur >= EncCfg::KEY_LONG_MS);
+            logPush(Evt::encKey((i == 0) ? 1 : 2, isLong));
         }
     }
 }
-// ===================== Touch logging (DOWN/XY/UP) =====================
+
+// ===================== Touch =====================
 static bool touchDown = false;
 static uint32_t lastTouchEventMs = 0;
 static uint32_t lastTouchLogMs = 0;
 static int16_t lastTx = -1, lastTy = -1;
 
-static const uint16_t TOUCH_UP_TIMEOUT_MS = 250;
-static const uint16_t TOUCH_LOG_MIN_MS    = 80;
-static const uint16_t TOUCH_LOG_MIN_DIST  = 6; // суммарный манхэттен
-
 static void handleTouch() {
     uint32_t now = millis();
 
-    // UP по таймауту (если давно не приходили touch.available())
-    if (touchDown && (now - lastTouchEventMs) > TOUCH_UP_TIMEOUT_MS) {
+    if (touchDown && (now - lastTouchEventMs) > TouchCfg::UP_TIMEOUT_MS) {
         touchDown = false;
-        logPush("EVT:TOUCH:UP");
+        logPush(Evt::TOUCH_UP);
         return;
     }
 
@@ -327,7 +274,6 @@ static void handleTouch() {
 
     int16_t x = (int16_t)touch.data.x;
     int16_t y = (int16_t)touch.data.y;
-
     if (x == 0 && y == 0) return;
 
     x = constrain(x, 0, 239);
@@ -335,16 +281,14 @@ static void handleTouch() {
 
     lastTouchEventMs = now;
 
-    // DOWN (первый пакет после "тишины")
     if (!touchDown) {
         touchDown = true;
         lastTx = x;
         lastTy = y;
-        lastTouchLogMs = 0; // чтобы сразу прологочить координаты
-        logPush("EVT:TOUCH:DOWN");
+        lastTouchLogMs = 0;
+        logPush(Evt::TOUCH_DOWN);
     }
 
-    // рисование как у тебя
     static int16_t lastDrawX = -1, lastDrawY = -1;
     static uint32_t lastDrawMs = 0;
     if (now - lastDrawMs >= 40) {
@@ -353,19 +297,18 @@ static void handleTouch() {
             lastDrawY = y;
             lastDrawMs = now;
             tft.fillCircle(x, y, 3, GC9A01A_GREEN);
-            tftBottomXY(x, y);
+            tftBottomCircleXY(x, y);
         }
     }
 
-    // лог координат (троттлим)
     uint16_t dist = (uint16_t)abs(x - lastTx) + (uint16_t)abs(y - lastTy);
-    if ((now - lastTouchLogMs) >= TOUCH_LOG_MIN_MS && dist >= TOUCH_LOG_MIN_DIST) {
+    if ((now - lastTouchLogMs) >= TouchCfg::LOG_MIN_MS && dist >= TouchCfg::LOG_MIN_DIST) {
         lastTouchLogMs = now;
         lastTx = x;
         lastTy = y;
 
-        char msg[LOG_LEN];
-        snprintf(msg, sizeof(msg), "EVT:TOUCH:X=%d,Y=%d", x, y);
+        char msg[LogCfg::LEN];
+        Evt::touchXY(msg, sizeof(msg), x, y);
         logPush(msg);
     }
 }
@@ -376,31 +319,30 @@ void setup() {
     Serial.begin(115200);
 
     // TFT init
-    SPI.begin(TFT_SCL, -1, TFT_SDA, TFT_CS);
+    SPI.begin(Pins::TFT_SCL, -1, Pins::TFT_SDA, Pins::TFT_CS);
     tft.begin();
     tft.setRotation(0);
     tft.fillScreen(GC9A01A_BLACK);
     tftText(40, 100, 2, GC9A01A_WHITE, "Init...");
 
     // Touch reset
-    pinMode(TP_RST, OUTPUT);
-    digitalWrite(TP_RST, LOW);
+    pinMode(Pins::TP_RST, OUTPUT);
+    digitalWrite(Pins::TP_RST, LOW);
     delay(20);
-    digitalWrite(TP_RST, HIGH);
+    digitalWrite(Pins::TP_RST, HIGH);
     delay(80);
 
     // I2C init + scan
-    Wire.begin(TP_SDA, TP_SCL);
+    Wire.begin(Pins::I2C_SDA, Pins::I2C_SCL);
     i2cScan();
 
     // Touch begin
     touch.begin();
 
-    // OLED init (попробуем 0x3C/0x3D и то, что нашли сканом)
+    // OLED init: сначала кандидаты, но только если адрес реально найден сканом
     oledOk = false;
-    uint8_t candidates[] = {0x3C, 0x3D, 0x03, 0x3F};
-    for (uint8_t i = 0; i < sizeof(candidates); i++) {
-        uint8_t a = candidates[i];
+    for (size_t i = 0; i < (sizeof(OledCfg::AddrCandidates) / sizeof(OledCfg::AddrCandidates[0])); i++) {
+        uint8_t a = OledCfg::AddrCandidates[i];
         if (!hasAddr(a)) continue;
         if (oled.begin(SSD1306_SWITCHCAPVCC, a)) {
             oledOk = true;
@@ -410,26 +352,26 @@ void setup() {
     }
 
     // MUX init
-    pinMode(MUX_S0, OUTPUT);
-    pinMode(MUX_S1, OUTPUT);
-    pinMode(MUX_S2, OUTPUT);
-    pinMode(MUX_S3, OUTPUT);
-    pinMode(MUX_EN, OUTPUT);
-    digitalWrite(MUX_EN, LOW); // enable
-    pinMode(MUX_SIG, INPUT_PULLUP);
+    pinMode(Pins::MUX_S0, OUTPUT);
+    pinMode(Pins::MUX_S1, OUTPUT);
+    pinMode(Pins::MUX_S2, OUTPUT);
+    pinMode(Pins::MUX_S3, OUTPUT);
+    pinMode(Pins::MUX_EN, OUTPUT);
+    digitalWrite(Pins::MUX_EN, LOW);
+    pinMode(Pins::MUX_SIG, INPUT_PULLUP);
 
     uint32_t now = millis();
-    for (uint8_t ch = 0; ch < BTN_COUNT; ch++) {
-        rawState[ch] = readButtonPressedByIndex(ch);
-        stableState[ch] = rawState[ch];
-        lastChangeMs[ch] = now;
+    for (uint8_t i = 0; i < BtnCfg::BTN_COUNT; i++) {
+        rawState[i] = readButtonPressedByIndex(i);
+        stableState[i] = rawState[i];
+        lastChangeMs[i] = now;
     }
 
     // Encoders init
-    pinMode(ENC1_A, INPUT_PULLUP);
-    pinMode(ENC1_B, INPUT_PULLUP);
-    pinMode(ENC2_A, INPUT_PULLUP);
-    pinMode(ENC2_B, INPUT_PULLUP);
+    pinMode(Pins::ENC1_A, INPUT_PULLUP);
+    pinMode(Pins::ENC1_B, INPUT_PULLUP);
+    pinMode(Pins::ENC2_A, INPUT_PULLUP);
+    pinMode(Pins::ENC2_B, INPUT_PULLUP);
 
     enc1.begin();
     enc1.setAcceleration(0);
@@ -437,37 +379,34 @@ void setup() {
     enc2.begin();
     enc2.setAcceleration(0);
 
-    attachInterrupt(digitalPinToInterrupt(ENC1_A), enc1ISR, CHANGE);
-    attachInterrupt(digitalPinToInterrupt(ENC1_B), enc1ISR, CHANGE);
-
-    attachInterrupt(digitalPinToInterrupt(ENC2_A), enc2ISR, CHANGE);
-    attachInterrupt(digitalPinToInterrupt(ENC2_B), enc2ISR, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(Pins::ENC1_A), enc1ISR, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(Pins::ENC1_B), enc1ISR, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(Pins::ENC2_A), enc2ISR, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(Pins::ENC2_B), enc2ISR, CHANGE);
 
     // BLE
     bleInit();
 
-    // UI ready
+    // Ready
     tft.fillScreen(GC9A01A_BLACK);
-    logPush("EVT:BOOT");
+    logPush(Evt::BOOT);
 
     if (oledOk) {
-        char msg[LOG_LEN];
-        snprintf(msg, sizeof(msg), "EVT:OLED:0x%02X", oledAddr);
+        char msg[LogCfg::LEN];
+        Evt::oledAddr(msg, sizeof(msg), oledAddr);
         logPush(msg);
     } else {
-        logPush("EVT:OLED:NOTFOUND");
+        logPush(Evt::OLED_NOTFOUND);
     }
 
-    logPush("EVT:READY");
+    logPush(Evt::READY);
 }
 
-
 void loop() {
-    scanButtons();            // остальные кнопки через MUX
-    handleEncoderKeysFromMux(); // KEY1/KEY2 (клик/лонг)
-    handleEncoders();         // вращение ENC1/ENC2
+    scanButtons();
+    handleEncoderKeysFromMux();
+    handleEncoders();
     handleTouch();
     oledRender();
-
     delay(2);
 }
