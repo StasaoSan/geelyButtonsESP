@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include <SPI.h>
 #include <Wire.h>
+#include <cstring>
+#include <string>
 
 #include <AiEsp32RotaryEncoder.h>
 #include <Adafruit_GC9A01A.h>
@@ -18,6 +20,24 @@
 // ===================== BLE =====================
 BLECharacteristic* g_char = nullptr;
 volatile bool g_deviceConnected = false;
+
+// Android -> ESP RX (handled in loop to avoid heavy work inside BLE callbacks)
+static volatile bool g_rxPending = false;
+static char g_rxMsg[LogCfg::LEN] = {0};
+
+class RxCallbacks : public BLECharacteristicCallbacks {
+public:
+    void onWrite(BLECharacteristic* ch) override {
+        std::string v = ch->getValue();
+        if (v.empty()) return;
+
+        size_t n = v.size();
+        if (n >= LogCfg::LEN) n = LogCfg::LEN - 1;
+        std::memcpy((void*)g_rxMsg, v.data(), n);
+        g_rxMsg[n] = '\0';
+        g_rxPending = true;
+    }
+};
 
 class MyServerCallbacks : public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) override {
@@ -46,8 +66,12 @@ static void bleInit() {
     BLEService* service = server->createService(Cfg::SERVICE_UUID);
     g_char = service->createCharacteristic(
             Cfg::CHARACTERISTIC_UUID,
-            BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
+            BLECharacteristic::PROPERTY_READ |
+            BLECharacteristic::PROPERTY_NOTIFY |
+            BLECharacteristic::PROPERTY_WRITE |
+            BLECharacteristic::PROPERTY_WRITE_NR
     );
+    g_char->setCallbacks(new RxCallbacks());
     g_char->addDescriptor(new BLE2902());
 
     service->start();
@@ -188,11 +212,14 @@ static bool hasAddr(uint8_t a) {
 static bool rawState[BtnCfg::BTN_COUNT];
 static bool stableState[BtnCfg::BTN_COUNT];
 static uint32_t lastChangeMs[BtnCfg::BTN_COUNT];
+static uint32_t btnDownMs[BtnCfg::BTN_COUNT];
+static bool btnWasDown[BtnCfg::BTN_COUNT];
 
 static void scanButtons() {
     uint32_t now = millis();
 
     for (uint8_t idx = 0; idx < BtnCfg::BTN_COUNT; idx++) {
+        // энкодерные кнопки ты обрабатываешь отдельно
         if (idx == BtnCfg::ENC1_KEY_IDX || idx == BtnCfg::ENC2_KEY_IDX) {
             continue;
         }
@@ -209,8 +236,22 @@ static void scanButtons() {
                 bool prev = stableState[idx];
                 stableState[idx] = rawState[idx];
 
+                // DOWN
                 if (!prev && stableState[idx]) {
-                    logPush(Evt::btnClickByIdx(idx));
+                    btnWasDown[idx] = true;
+                    btnDownMs[idx] = now;
+                }
+
+                // UP
+                if (prev && !stableState[idx]) {
+                    if (btnWasDown[idx]) {
+                        btnWasDown[idx] = false;
+                        uint32_t dur = now - btnDownMs[idx];
+                        bool isLong = (dur >= BtnCfg::LONG_MS);
+
+                        logPush(isLong ? Evt::btnLongByIdx(idx)
+                                       : Evt::btnClickByIdx(idx));
+                    }
                 }
             }
         }
@@ -364,6 +405,8 @@ void setup() {
     for (uint8_t i = 0; i < BtnCfg::BTN_COUNT; i++) {
         rawState[i] = readButtonPressedByIndex(i);
         stableState[i] = rawState[i];
+        btnWasDown[i] = stableState[i];
+        btnDownMs[i] = btnWasDown[i] ? now : 0;
         lastChangeMs[i] = now;
     }
 
@@ -408,5 +451,14 @@ void loop() {
     handleEncoders();
     handleTouch();
     oledRender();
+
+    // Process Android -> ESP incoming messages (writable characteristic)
+    if (g_rxPending) {
+        g_rxPending = false;
+        char buf[LogCfg::LEN];
+        std::snprintf(buf, sizeof(buf), "RX:%s", g_rxMsg);
+        logPush(buf);
+    }
+
     delay(2);
 }

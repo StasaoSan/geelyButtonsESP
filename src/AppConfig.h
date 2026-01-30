@@ -59,7 +59,7 @@ namespace BtnCfg {
     static constexpr uint8_t ENC2_KEY_IDX = 2;
 
     static constexpr uint16_t DEBOUNCE_MS = 30;
-    static constexpr bool ACTIVE_LOW = true;
+    static constexpr uint16_t LONG_MS = 450;
 }
 
 // ===================== Encoder key timings =====================
@@ -119,10 +119,33 @@ namespace Evt {
             "EVT:BTN:C15:CLICK", // d15, action not invented yet
     };
 
+    static constexpr const char* BTN_LONG[BtnCfg::BTN_COUNT] = {
+            "EVT:BTN:C0:LONG",
+            "EVT:BTN:C1:LONG",
+            "EVT:BTN:C2:LONG",
+            "EVT:BTN:C3:LONG",
+            "EVT:BTN:C4:LONG",
+            "EVT:BTN:C5:LONG",
+            "EVT:BTN:C6:LONG",
+            "EVT:BTN:C7:LONG",
+            "EVT:BTN:C8:LONG",
+            "EVT:DRIVER_HEAT_OFF", // d9
+            "EVT:DRIVER_FAN_OFF", // d10
+            "EVT:WHEEL_HEAT_OFF", // d11
+            "EVT:PASS_HEAT_OFF", // d12
+            "EVT:PASS_FAN_OFF", // d13
+            "EVT:BTN:C14:LONG",
+            "EVT:BTN:C15:LONG",
+    };
+
     // хелперы выбора статических строк
     static inline const char* encStep(uint8_t enc, long delta) {
         if (enc == 1) return (delta > 0) ? ENC1_P : ENC1_M;
         return (delta > 0) ? ENC2_P : ENC2_M;
+    }
+    static inline const char* btnLongByIdx(uint8_t idx) {
+        if (idx >= BtnCfg::BTN_COUNT) return "EVT:BTN:UNKNOWN:LONG";
+        return BTN_LONG[idx];
     }
 
     static inline const char* btnClickByIdx(uint8_t idx) {
