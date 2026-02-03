@@ -21,6 +21,9 @@
 BLECharacteristic* g_char = nullptr;
 volatile bool g_deviceConnected = false;
 
+static void tftStatusCircle(const char* s);
+static bool logDirty = true;
+
 // Android -> ESP RX (handled in loop to avoid heavy work inside BLE callbacks)
 static volatile bool g_rxPending = false;
 static char g_rxMsg[LogCfg::LEN] = {0};
@@ -43,9 +46,13 @@ class MyServerCallbacks : public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) override {
         (void)pServer;
         g_deviceConnected = true;
+        logDirty = true;             // чтобы oledRender обновил статус
+        tftStatusCircle("BLE:ON");   // чтобы на TFT тоже сразу видно
     }
     void onDisconnect(BLEServer* pServer) override {
         g_deviceConnected = false;
+        logDirty = true;
+        tftStatusCircle("BLE:OFF");
         pServer->getAdvertising()->start();
     }
 };
@@ -153,7 +160,9 @@ static void tftBottomCircleXY(int16_t x, int16_t y) {
 // ===================== Logger =====================
 static char logBuf[LogCfg::LINES][LogCfg::LEN];
 static uint8_t logHead = 0;
-static bool logDirty = true;
+static int g_rearDefrost = -1;     // -1 unknown, 0 off, 1 on
+static int g_electricDefrost = -1; // -1 unknown, 0 off, 1 on
+
 
 static void logPush(const char* msg) {
     strncpy(logBuf[logHead], msg, LogCfg::LEN - 1);
@@ -166,6 +175,31 @@ static void logPush(const char* msg) {
     bleSend(msg);
 }
 
+static void processRx(const char* s) {
+    // ожидаем "FB:REAR:1" или "FB:ELECTRIC:0"
+    if (strncmp(s, "FB:REAR:", 8) == 0) {
+        int v = atoi(s + 8);
+        g_rearDefrost = v;
+        char b[LogCfg::LEN];
+        snprintf(b, sizeof(b), "REAR_DEF:%s", (v == 1 ? "ON" : "OFF"));
+        logPush(b);
+        return;
+    }
+    if (strncmp(s, "FB:ELECTRIC:", 12) == 0) {
+        int v = atoi(s + 12);
+        g_electricDefrost = v;
+        char b[LogCfg::LEN];
+        snprintf(b, sizeof(b), "E_DEF:%s", (v == 1 ? "ON" : "OFF"));
+        logPush(b);
+        return;
+    }
+
+    // fallback
+    char buf[LogCfg::LEN];
+    snprintf(buf, sizeof(buf), "RX:%s", s);
+    logPush(buf);
+}
+
 static void oledRender() {
     if (!oledOk || !logDirty) return;
 
@@ -176,11 +210,15 @@ static void oledRender() {
     oled.setCursor(0, 0);
     oled.print("BLE:");
     oled.print(g_deviceConnected ? "ON " : "OFF");
-    oled.print(" I2C:OK");
+    oled.setCursor(0, 8);
+    oled.print("R:");
+    oled.print(g_rearDefrost < 0 ? "?" : (g_rearDefrost ? "1" : "0"));
+    oled.print(" E:");
+    oled.print(g_electricDefrost < 0 ? "?" : (g_electricDefrost ? "1" : "0"));
 
     for (uint8_t i = 0; i < LogCfg::LINES; i++) {
         uint8_t idx = (logHead + i) % LogCfg::LINES;
-        oled.setCursor(0, 8 + i * 8);
+        oled.setCursor(0, 16 + i * 8);
         oled.print(logBuf[idx]);
     }
 
@@ -455,10 +493,9 @@ void loop() {
     // Process Android -> ESP incoming messages (writable characteristic)
     if (g_rxPending) {
         g_rxPending = false;
-        char buf[LogCfg::LEN];
-        std::snprintf(buf, sizeof(buf), "RX:%s", g_rxMsg);
-        logPush(buf);
+        processRx(g_rxMsg);
     }
+    delay(2);
 
     delay(2);
 }

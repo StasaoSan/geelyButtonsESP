@@ -76,7 +76,7 @@ namespace TouchCfg {
 
 // ===================== Logger buffer sizes =====================
 namespace LogCfg {
-    static constexpr uint8_t  LINES = 7;
+    static constexpr uint8_t  LINES = 6;
     static constexpr uint8_t  LEN   = 32;
 }
 
