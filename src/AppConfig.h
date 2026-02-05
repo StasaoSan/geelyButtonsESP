@@ -1,6 +1,8 @@
 #pragma once
 #include <Arduino.h>
 
+#include "CircleText.h"
+
 // ===================== BLE =====================
 namespace Cfg {
     static constexpr const char* BLE_NAME = "geelyController";
@@ -59,14 +61,15 @@ namespace BtnCfg {
     static constexpr uint8_t ENC2_KEY_IDX = 2;
 
     static constexpr uint16_t DEBOUNCE_MS = 30;
-    static constexpr uint16_t LONG_MS = 450;
+    static constexpr uint16_t LONG_MS     = 450;
 }
 
 // ===================== Encoder key timings =====================
 namespace EncCfg {
-    static constexpr uint16_t KEY_LONG_MS = 450;
+    static constexpr uint16_t KEY_LONG_MS     = 450;
     static constexpr uint16_t KEY_DEBOUNCE_MS = 25;
 }
+
 // ===================== Touch timings =====================
 namespace TouchCfg {
     static constexpr uint16_t UP_TIMEOUT_MS = 250;
@@ -83,40 +86,40 @@ namespace LogCfg {
 // ===================== Event strings + форматтеры =====================
 namespace Evt {
     // статические
-    static constexpr const char* BOOT         = "EVT:BOOT";
-    static constexpr const char* READY        = "EVT:READY";
-    static constexpr const char* OLED_NOTFOUND= "EVT:OLED:NOTFOUND";
+    static constexpr const char* BOOT          = "EVT:BOOT";
+    static constexpr const char* READY         = "EVT:READY";
+    static constexpr const char* OLED_NOTFOUND = "EVT:OLED:NOTFOUND";
 
-    static constexpr const char* TOUCH_DOWN   = "EVT:TOUCH:DOWN";
-    static constexpr const char* TOUCH_UP     = "EVT:TOUCH:UP";
+    static constexpr const char* TOUCH_DOWN    = "EVT:TOUCH:DOWN";
+    static constexpr const char* TOUCH_UP      = "EVT:TOUCH:UP";
 
-    static constexpr const char* ENC1_P       = "EVT:TEMP_MAIN:+1";
-    static constexpr const char* ENC1_M       = "EVT:TEMP_MAIN:-1";
-    static constexpr const char* ENC2_P       = "EVT:TEMP_PASS:+1";
-    static constexpr const char* ENC2_M       = "EVT:TEMP_PASS:-1";
+    static constexpr const char* ENC1_P        = "EVT:TEMP_MAIN:+1";
+    static constexpr const char* ENC1_M        = "EVT:TEMP_MAIN:-1";
+    static constexpr const char* ENC2_P        = "EVT:TEMP_PASS:+1";
+    static constexpr const char* ENC2_M        = "EVT:TEMP_PASS:-1";
 
-    static constexpr const char* ENC1_CLICK   = "EVT:CLIMATE_SW";
-    static constexpr const char* ENC1_LONG    = "EVT:DUAL_SW";
-    static constexpr const char* ENC2_CLICK   = "EVT:REAR_DEFROST";
-    static constexpr const char* ENC2_LONG    = "EVT:ELECTRIC_DEFROST";
+    static constexpr const char* ENC1_CLICK    = "EVT:CLIMATE_SW";
+    static constexpr const char* ENC1_LONG     = "EVT:DUAL_SW";
+    static constexpr const char* ENC2_CLICK    = "EVT:REAR_DEFROST";
+    static constexpr const char* ENC2_LONG     = "EVT:ELECTRIC_DEFROST";
 
     static constexpr const char* BTN_CLICK[BtnCfg::BTN_COUNT] = {
             "EVT:BTN:C0:CLICK", // nothing connected yet
-            "", // see encoder actions
-            "", // see encoder actions
-            "EVT:FAN:+1",   // d3
-            "EVT:FAN:-1", // d4
-            "EVT:CLIMATE_BODY", // d5
-            "EVT:CLIMATE_LEGS", // d6
-            "EVT:CLIMATE_WINDOWS", // d7
-            "EVT:THUNK", // d8
-            "EVT:DRIVER_HEAT", // d9
-            "EVT:DRIVER_FAN", // d10
-            "EVT:WHEEL_HEAT", // d11
-            "EVT:PASS_HEAT", // d12
-            "EVT:PASS_FAN", // d13
-            "EVT:BTN:C14:CLICK", // d14, action not invented yet
-            "EVT:BTN:C15:CLICK", // d15, action not invented yet
+            "", // encoder key handled separately
+            "", // encoder key handled separately
+            "EVT:FAN:+1",            // d3
+            "EVT:FAN:-1",            // d4
+            "EVT:CLIMATE_BODY",      // d5
+            "EVT:CLIMATE_LEGS",      // d6
+            "EVT:CLIMATE_WINDOWS",   // d7
+            "EVT:THUNK",             // d8
+            "EVT:DRIVER_HEAT",       // d9
+            "EVT:DRIVER_FAN",        // d10
+            "EVT:WHEEL_HEAT",        // d11
+            "EVT:PASS_HEAT",         // d12
+            "EVT:PASS_FAN",          // d13
+            "EVT:BTN:C14:CLICK",     // d14
+            "EVT:BTN:C15:CLICK",     // d15
     };
 
     static constexpr const char* BTN_LONG[BtnCfg::BTN_COUNT] = {
@@ -129,11 +132,11 @@ namespace Evt {
             "EVT:BTN:C6:LONG",
             "EVT:BTN:C7:LONG",
             "EVT:BTN:C8:LONG",
-            "EVT:DRIVER_HEAT_OFF", // d9
-            "EVT:DRIVER_FAN_OFF", // d10
-            "EVT:WHEEL_HEAT_OFF", // d11
-            "EVT:PASS_HEAT_OFF", // d12
-            "EVT:PASS_FAN_OFF", // d13
+            "EVT:DRIVER_HEAT_OFF",   // d9
+            "EVT:DRIVER_FAN_OFF",    // d10
+            "EVT:WHEEL_HEAT_OFF",    // d11
+            "EVT:PASS_HEAT_OFF",     // d12
+            "EVT:PASS_FAN_OFF",      // d13
             "EVT:BTN:C14:LONG",
             "EVT:BTN:C15:LONG",
     };
@@ -143,6 +146,7 @@ namespace Evt {
         if (enc == 1) return (delta > 0) ? ENC1_P : ENC1_M;
         return (delta > 0) ? ENC2_P : ENC2_M;
     }
+
     static inline const char* btnLongByIdx(uint8_t idx) {
         if (idx >= BtnCfg::BTN_COUNT) return "EVT:BTN:UNKNOWN:LONG";
         return BTN_LONG[idx];
@@ -168,8 +172,7 @@ namespace Evt {
     }
 }
 
-#include "CircleText.h"
-
+// ===================== TFT circle text configs =====================
 namespace TftTextCfg {
     // Строка статуса сверху (как твой tftTopStatus, но под круг)
     static inline CircleTextConfig Status() {

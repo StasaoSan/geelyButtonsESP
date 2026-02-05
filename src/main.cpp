@@ -3,6 +3,7 @@
 #include <Wire.h>
 #include <cstring>
 #include <string>
+#include <cmath>   // isnan, NAN
 
 #include <AiEsp32RotaryEncoder.h>
 #include <Adafruit_GC9A01A.h>
@@ -46,8 +47,8 @@ class MyServerCallbacks : public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) override {
         (void)pServer;
         g_deviceConnected = true;
-        logDirty = true;             // чтобы oledRender обновил статус
-        tftStatusCircle("BLE:ON");   // чтобы на TFT тоже сразу видно
+        logDirty = true;
+        tftStatusCircle("BLE:ON");
     }
     void onDisconnect(BLEServer* pServer) override {
         g_deviceConnected = false;
@@ -136,13 +137,9 @@ static void tftText(int16_t x, int16_t y, uint8_t size, uint16_t color, const ch
 }
 
 static void tftStatusCircle(const char* s) {
-    // чистим верхнюю область (прямоугольник) — быстро и достаточно
     auto cfg = TftTextCfg::Status();
     tft.fillRect(0, cfg.topY, 240, (cfg.bottomY - cfg.topY + 1), GC9A01A_BLACK);
-
-    // Важно: чтобы GFX сам не переносил, переносим только через CircleText
     tft.setTextWrap(false);
-
     CircleText::drawWithConfig(tft, cfg, s, CircleTextPos::Top);
 }
 
@@ -160,9 +157,15 @@ static void tftBottomCircleXY(int16_t x, int16_t y) {
 // ===================== Logger =====================
 static char logBuf[LogCfg::LINES][LogCfg::LEN];
 static uint8_t logHead = 0;
+
 static int g_rearDefrost = -1;     // -1 unknown, 0 off, 1 on
 static int g_electricDefrost = -1; // -1 unknown, 0 off, 1 on
 
+static int  g_fanArea = -1;
+static char g_fanLevel[12] = "?";  // OFF/AUTO/L1..L9/UNK
+
+static float g_tempMain = NAN;     // area=1
+static float g_tempPass = NAN;     // area=4
 
 static void logPush(const char* msg) {
     strncpy(logBuf[logHead], msg, LogCfg::LEN - 1);
@@ -176,7 +179,7 @@ static void logPush(const char* msg) {
 }
 
 static void processRx(const char* s) {
-    // ожидаем "FB:REAR:1" или "FB:ELECTRIC:0"
+    // FB:REAR:1
     if (strncmp(s, "FB:REAR:", 8) == 0) {
         int v = atoi(s + 8);
         g_rearDefrost = v;
@@ -185,6 +188,8 @@ static void processRx(const char* s) {
         logPush(b);
         return;
     }
+
+    // FB:ELECTRIC:0
     if (strncmp(s, "FB:ELECTRIC:", 12) == 0) {
         int v = atoi(s + 12);
         g_electricDefrost = v;
@@ -194,7 +199,58 @@ static void processRx(const char* s) {
         return;
     }
 
-    // fallback
+    // FB:FAN:<area>:<level>
+    // example: FB:FAN:8:L3
+    if (strncmp(s, "FB:FAN:", 7) == 0) {
+        const char* p = s + 7;
+        g_fanArea = atoi(p);
+
+        const char* c1 = strchr(p, ':');
+        if (c1 && *(c1 + 1)) {
+            strncpy(g_fanLevel, c1 + 1, sizeof(g_fanLevel) - 1);
+            g_fanLevel[sizeof(g_fanLevel) - 1] = '\0';
+        } else {
+            strncpy(g_fanLevel, "?", sizeof(g_fanLevel));
+            g_fanLevel[sizeof(g_fanLevel) - 1] = '\0';
+        }
+
+        char b[LogCfg::LEN];
+        snprintf(b, sizeof(b), "FAN:%d:%s", g_fanArea, g_fanLevel);
+        logPush(b);
+        return;
+    }
+
+    // GIB:FLOAT:<id>:<area>:<value>
+    // example: GIB:FLOAT:268828928:1:22.5
+    if (strncmp(s, "GIB:FLOAT:", 10) == 0) {
+        const char* p = s + 10;
+
+        int id = atoi(p);
+        const char* c1 = strchr(p, ':');
+        if (!c1) goto fallback;
+        int area = atoi(c1 + 1);
+
+        const char* c2 = strchr(c1 + 1, ':');
+        if (!c2) goto fallback;
+        float v = (float)atof(c2 + 1);
+
+        if (id == 268828928) { // IHvac.HVAC_FUNC_TEMP
+            if (area == 1) g_tempMain = v;
+            else if (area == 4) g_tempPass = v;
+
+            char b[LogCfg::LEN];
+            snprintf(b, sizeof(b), "TEMP:%d:%.1f", area, v);
+            logPush(b);
+            return;
+        }
+
+        char b[LogCfg::LEN];
+        snprintf(b, sizeof(b), "F:%d:%d:%.2f", id, area, v);
+        logPush(b);
+        return;
+    }
+
+    fallback:
     char buf[LogCfg::LEN];
     snprintf(buf, sizeof(buf), "RX:%s", s);
     logPush(buf);
@@ -207,15 +263,33 @@ static void oledRender() {
     oled.setTextSize(1);
     oled.setTextColor(SSD1306_WHITE);
 
+    // line 0
     oled.setCursor(0, 0);
     oled.print("BLE:");
     oled.print(g_deviceConnected ? "ON " : "OFF");
-    oled.setCursor(0, 8);
+
+    oled.setCursor(70, 0);
     oled.print("R:");
     oled.print(g_rearDefrost < 0 ? "?" : (g_rearDefrost ? "1" : "0"));
     oled.print(" E:");
     oled.print(g_electricDefrost < 0 ? "?" : (g_electricDefrost ? "1" : "0"));
 
+    // line 1
+    oled.setCursor(0, 8);
+    oled.print("F:");
+    if (g_fanArea < 0) oled.print("?:");
+    else { oled.print(g_fanArea); oled.print(":"); }
+    oled.print(g_fanLevel);
+
+    oled.setCursor(70, 8);
+    oled.print("T1:");
+    if (isnan(g_tempMain)) oled.print("?");
+    else oled.print(String(g_tempMain, 1));
+    oled.print(" T4:");
+    if (isnan(g_tempPass)) oled.print("?");
+    else oled.print(String(g_tempPass, 1));
+
+    // logs (start lower)
     for (uint8_t i = 0; i < LogCfg::LINES; i++) {
         uint8_t idx = (logHead + i) % LogCfg::LINES;
         oled.setCursor(0, 16 + i * 8);
@@ -257,10 +331,8 @@ static void scanButtons() {
     uint32_t now = millis();
 
     for (uint8_t idx = 0; idx < BtnCfg::BTN_COUNT; idx++) {
-        // энкодерные кнопки ты обрабатываешь отдельно
-        if (idx == BtnCfg::ENC1_KEY_IDX || idx == BtnCfg::ENC2_KEY_IDX) {
-            continue;
-        }
+        // энкодерные кнопки отдельно
+        if (idx == BtnCfg::ENC1_KEY_IDX || idx == BtnCfg::ENC2_KEY_IDX) continue;
 
         bool r = readButtonPressedByIndex(idx);
 
@@ -418,7 +490,7 @@ void setup() {
     // Touch begin
     touch.begin();
 
-    // OLED init: сначала кандидаты, но только если адрес реально найден сканом
+    // OLED init
     oledOk = false;
     for (size_t i = 0; i < (sizeof(OledCfg::AddrCandidates) / sizeof(OledCfg::AddrCandidates[0])); i++) {
         uint8_t a = OledCfg::AddrCandidates[i];
@@ -490,12 +562,10 @@ void loop() {
     handleTouch();
     oledRender();
 
-    // Process Android -> ESP incoming messages (writable characteristic)
     if (g_rxPending) {
         g_rxPending = false;
         processRx(g_rxMsg);
     }
-    delay(2);
 
     delay(2);
 }
