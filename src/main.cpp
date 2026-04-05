@@ -20,7 +20,9 @@
 
 // ===================== BLE =====================
 BLECharacteristic* g_char = nullptr;
-volatile bool g_deviceConnected = false;
+volatile bool g_deviceConnected  = false;
+volatile bool g_needSync         = false;  // запрос текущего состояния от приложения
+volatile bool g_bleDisconnected  = false;  // сброс состояния после разрыва
 
 static void tftStatusCircle(const char* s);
 static bool logDirty = true;
@@ -47,11 +49,13 @@ class MyServerCallbacks : public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) override {
         (void)pServer;
         g_deviceConnected = true;
+        g_needSync        = true;   // попросить приложение прислать текущее состояние
         logDirty = true;
         tftStatusCircle("BLE:ON");
     }
     void onDisconnect(BLEServer* pServer) override {
         g_deviceConnected = false;
+        g_bleDisconnected = true;   // сброс состояния обработается в loop()
         logDirty = true;
         tftStatusCircle("BLE:OFF");
         pServer->getAdvertising()->start();
@@ -99,9 +103,11 @@ Adafruit_GC9A01A tft(Pins::TFT_CS, Pins::TFT_DC, Pins::TFT_RST);
 // CST816S ctor: (sda, scl, rst, int)
 CST816S touch(Pins::I2C_SDA, Pins::I2C_SCL, Pins::TP_RST, Pins::TP_INT);
 
-static bool oledOk = false;
-static uint8_t oledAddr = 0x3C;
-Adafruit_SSD1306 oled(OledCfg::W, OledCfg::H, &Wire, -1);
+static Adafruit_SSD1306 oled0(OledCfg::WIDTHS[0], OledCfg::HEIGHTS[0], &Wire,  -1);
+static Adafruit_SSD1306 oled1(OledCfg::WIDTHS[1], OledCfg::HEIGHTS[1], &Wire,  -1);
+static Adafruit_SSD1306 oled2(OledCfg::WIDTHS[2], OledCfg::HEIGHTS[2], &Wire1, -1);
+static Adafruit_SSD1306* const oleds[OledCfg::COUNT] = {&oled0, &oled1, &oled2};
+static bool oledOk[OledCfg::COUNT] = {};
 
 // ===================== 4067 MUX helpers =====================
 static inline void muxSelect(uint8_t ch) {
@@ -167,6 +173,10 @@ static char g_fanLevel[12] = "?";  // OFF/AUTO/L1..L9/UNK
 static float g_tempMain = NAN;     // area=1
 static float g_tempPass = NAN;     // area=4
 
+static bool g_enc2VolumeMode = false;
+static int  g_volumeLevel    = 50;   // 0..100
+static uint8_t g_climDir     = 0;    // индекс в ClimateDirCfg::EVENTS
+
 static void logPush(const char* msg) {
     strncpy(logBuf[logHead], msg, LogCfg::LEN - 1);
     logBuf[logHead][LogCfg::LEN - 1] = '\0';
@@ -220,6 +230,25 @@ static void processRx(const char* s) {
         return;
     }
 
+    // FB:TEMP:MAIN:22.0  |  FB:TEMP:PASS:22.0
+    if (strncmp(s, "FB:TEMP:", 8) == 0) {
+        const char* p = s + 8;
+        if (strncmp(p, "MAIN:", 5) == 0) {
+            g_tempMain = (float)atof(p + 5);
+            char b[LogCfg::LEN];
+            snprintf(b, sizeof(b), "T1:%.1f", g_tempMain);
+            logPush(b);
+            return;
+        }
+        if (strncmp(p, "PASS:", 5) == 0) {
+            g_tempPass = (float)atof(p + 5);
+            char b[LogCfg::LEN];
+            snprintf(b, sizeof(b), "T4:%.1f", g_tempPass);
+            logPush(b);
+            return;
+        }
+    }
+
     // GIB:FLOAT:<id>:<area>:<value>
     // example: GIB:FLOAT:268828928:1:22.5
     if (strncmp(s, "GIB:FLOAT:", 10) == 0) {
@@ -256,48 +285,155 @@ static void processRx(const char* s) {
     logPush(buf);
 }
 
-static void oledRender() {
-    if (!oledOk || !logDirty) return;
+// ===================== 64x32 screen renderers =====================
 
-    oled.clearDisplay();
-    oled.setTextSize(1);
-    oled.setTextColor(SSD1306_WHITE);
+// Температура: целая часть — size=3, дробная — size=1 (сверху справа)
+static void oledRenderTempScreen(Adafruit_SSD1306& d, float temp) {
+    d.clearDisplay();
+    d.setTextWrap(false);
+    d.setTextColor(SSD1306_WHITE);
 
-    // line 0
-    oled.setCursor(0, 0);
-    oled.print("BLE:");
-    oled.print(g_deviceConnected ? "ON " : "OFF");
+    if (isnan(temp)) {
+        d.setTextSize(3);
+        d.setCursor((64 - 18) / 2, 4);
+        d.print("?");
+    } else {
+        bool neg    = (temp < 0.0f);
+        float abst  = fabsf(temp);
+        int   ipart = (int)abst;
+        int   dpart = (int)roundf((abst - ipart) * 10.0f);
+        if (dpart >= 10) { ipart++; dpart = 0; }
 
-    oled.setCursor(70, 0);
-    oled.print("R:");
-    oled.print(g_rearDefrost < 0 ? "?" : (g_rearDefrost ? "1" : "0"));
-    oled.print(" E:");
-    oled.print(g_electricDefrost < 0 ? "?" : (g_electricDefrost ? "1" : "0"));
+        char ibuf[8];
+        snprintf(ibuf, sizeof(ibuf), neg ? "-%d" : "%d", ipart);
+        bool hasDec = (dpart != 0);
 
-    // line 1
-    oled.setCursor(0, 8);
-    oled.print("F:");
-    if (g_fanArea < 0) oled.print("?:");
-    else { oled.print(g_fanArea); oled.print(":"); }
-    oled.print(g_fanLevel);
+        // size=3 → 18px/char wide, 24px tall
+        // size=1 → 6px/char wide,  8px tall
+        int iw = (int)strlen(ibuf) * 18;
+        int dw = hasDec ? 12 : 0;  // ".X" = 2 chars * 6px
+        int sx = (64 - iw - dw) / 2;
+        if (sx < 0) sx = 0;
 
-    oled.setCursor(70, 8);
-    oled.print("T1:");
-    if (isnan(g_tempMain)) oled.print("?");
-    else oled.print(String(g_tempMain, 1));
-    oled.print(" T4:");
-    if (isnan(g_tempPass)) oled.print("?");
-    else oled.print(String(g_tempPass, 1));
+        d.setTextSize(3);
+        d.setCursor(sx, 4);
+        d.print(ibuf);
 
-    // logs (start lower)
-    for (uint8_t i = 0; i < LogCfg::LINES; i++) {
-        uint8_t idx = (logHead + i) % LogCfg::LINES;
-        oled.setCursor(0, 16 + i * 8);
-        oled.print(logBuf[idx]);
+        if (hasDec) {
+            char dbuf[4];
+            snprintf(dbuf, sizeof(dbuf), ".%d", dpart);
+            d.setTextSize(1);
+            d.setCursor(sx + iw, 4);
+            d.print(dbuf);
+        }
     }
 
-    oled.display();
+    d.display();
+}
+
+// Две температуры на одном 64x32 (если второй экран недоступен: оба на 0x3C)
+// Верхняя половина — водитель, нижняя — пассажир, size=2
+static void oledRenderDualTempScreen(Adafruit_SSD1306& d, float tempD, float tempP) {
+    d.clearDisplay();
+    d.setTextWrap(false);
+    d.setTextColor(SSD1306_WHITE);
+
+    auto drawHalf = [&](float t, int y) {
+        char buf[10];
+        if (isnan(t)) strcpy(buf, "?");
+        else snprintf(buf, sizeof(buf), "%.1f", t);
+        int w = (int)strlen(buf) * 12;  // size=2: 6*2=12px/char
+        d.setTextSize(2);
+        d.setCursor((64 - w) / 2, y);
+        d.print(buf);
+    };
+
+    drawHalf(tempD, 0);   // y=0..15: водитель
+    drawHalf(tempP, 16);  // y=16..31: пассажир
+
+    d.display();
+}
+
+// Громкость: "VOL" мелко сверху, число крупно снизу
+static void oledRenderVolScreen(Adafruit_SSD1306& d) {
+    d.clearDisplay();
+    d.setTextWrap(false);
+    d.setTextColor(SSD1306_WHITE);
+
+    d.setTextSize(1);
+    d.setCursor(0, 0);
+    d.print("VOL");
+
+    char buf[5];
+    snprintf(buf, sizeof(buf), "%d", g_volumeLevel);
+    int w = (int)strlen(buf) * 18;
+    d.setTextSize(3);
+    d.setCursor((64 - w) / 2, 8);
+    d.print(buf);
+
+    d.display();
+}
+
+static void oledRenderOne(Adafruit_SSD1306& d) {
+    d.clearDisplay();
+    d.setTextSize(1);
+    d.setTextColor(SSD1306_WHITE);
+    d.setTextWrap(false);
+
+    // line 0: BLE + defrost
+    d.setCursor(0, 0);
+    d.print(g_deviceConnected ? "BLE:ON" : "BLE:OFF");
+    d.print(" R:");
+    d.print(g_rearDefrost < 0 ? "?" : (g_rearDefrost ? "1" : "0"));
+    d.print(" E:");
+    d.print(g_electricDefrost < 0 ? "?" : (g_electricDefrost ? "1" : "0"));
+
+    // line 1: fan + temps
+    d.setCursor(0, 8);
+    d.print("F:");
+    if (g_fanArea < 0) d.print("?:");
+    else { d.print(g_fanArea); d.print(":"); }
+    d.print(g_fanLevel);
+    d.print(" T1:");
+    if (isnan(g_tempMain)) d.print("?");
+    else d.print(String(g_tempMain, 1));
+
+    // lines 2-3: last 2 log entries
+    for (uint8_t i = 0; i < 2; i++) {
+        uint8_t idx = (logHead + LogCfg::LINES - 2 + i) % LogCfg::LINES;
+        d.setCursor(0, 16 + i * 8);
+        d.print(logBuf[idx]);
+    }
+
+    d.display();
+}
+
+static void oledRender() {
+    if (!logDirty) return;
     logDirty = false;
+
+    if (oledOk[0]) {
+        if (!oledOk[1]) {
+            // Оба 64x32 на одном адресе (0x3C) — показываем обе температуры на одном экране
+            if (g_enc2VolumeMode) oledRenderVolScreen(oled0);
+            else                  oledRenderDualTempScreen(oled0, g_tempMain, g_tempPass);
+        } else {
+            oledRenderTempScreen(oled0, g_tempMain);
+        }
+    }
+    if (oledOk[1]) {
+        if (g_enc2VolumeMode) oledRenderVolScreen(oled1);
+        else                  oledRenderTempScreen(oled1, g_tempPass);
+    }
+    if (oledOk[2]) {
+        oledRenderOne(oled2);
+        // строка статуса экранов внизу oled2 (для диагностики адресов)
+        oled2.setTextSize(1);
+        oled2.setTextColor(SSD1306_WHITE);
+        oled2.setCursor(0, 24);
+        oled2.printf("scr:%d%d%d", oledOk[0]?1:0, oledOk[1]?1:0, oledOk[2]?1:0);
+        oled2.display();
+    }
 }
 
 // ===================== I2C scan + OLED detect =====================
@@ -320,12 +456,51 @@ static bool hasAddr(uint8_t a) {
     return false;
 }
 
+static uint8_t foundAddrs1[16];
+static uint8_t foundCnt1 = 0;
+
+static void i2cScan1() {
+    foundCnt1 = 0;
+    for (uint8_t addr = 1; addr < 127; addr++) {
+        Wire1.beginTransmission(addr);
+        if (Wire1.endTransmission() == 0) {
+            if (foundCnt1 < sizeof(foundAddrs1)) foundAddrs1[foundCnt1++] = addr;
+        }
+        delay(2);
+    }
+}
+
+static bool hasAddr1(uint8_t a) {
+    for (uint8_t i = 0; i < foundCnt1; i++) if (foundAddrs1[i] == a) return true;
+    return false;
+}
+
 // ===================== Buttons debounce =====================
 static bool rawState[BtnCfg::BTN_COUNT];
 static bool stableState[BtnCfg::BTN_COUNT];
 static uint32_t lastChangeMs[BtnCfg::BTN_COUNT];
 static uint32_t btnDownMs[BtnCfg::BTN_COUNT];
 static bool btnWasDown[BtnCfg::BTN_COUNT];
+
+static void handleButtonEvent(uint8_t idx, bool isLong) {
+    // Climate direction cycle (один клик — следующая комбинация зон)
+    if (!isLong && idx == ClimateDirCfg::BTN_IDX) {
+        g_climDir = (g_climDir + 1) % ClimateDirCfg::MODE_COUNT;
+        logPush(ClimateDirCfg::EVENTS[g_climDir]);
+        return;
+    }
+
+    // Переключение enc2 в режим громкости (долгое нажатие C12)
+    if (isLong && idx == VolumeCfg::MODE_BTN_IDX) {
+        g_enc2VolumeMode = !g_enc2VolumeMode;
+        logPush(g_enc2VolumeMode ? VolumeCfg::MODE_ON : VolumeCfg::MODE_OFF);
+        return;
+    }
+
+    // Стандартная обработка
+    const char* ev = isLong ? Evt::btnLongByIdx(idx) : Evt::btnClickByIdx(idx);
+    if (ev && ev[0] != '\0') logPush(ev);
+}
 
 static void scanButtons() {
     uint32_t now = millis();
@@ -359,8 +534,7 @@ static void scanButtons() {
                         uint32_t dur = now - btnDownMs[idx];
                         bool isLong = (dur >= BtnCfg::LONG_MS);
 
-                        logPush(isLong ? Evt::btnLongByIdx(idx)
-                                       : Evt::btnClickByIdx(idx));
+                        handleButtonEvent(idx, isLong);
                     }
                 }
             }
@@ -384,7 +558,13 @@ static void handleEncoders() {
     long d2 = p2 - enc2Last;
     if (d2 != 0) {
         enc2Last = p2;
-        logPush(Evt::encStep(2, d2));
+        if (g_enc2VolumeMode) {
+            g_volumeLevel = constrain(g_volumeLevel + (d2 > 0 ? 1 : -1),
+                                      VolumeCfg::MIN, VolumeCfg::MAX);
+            logPush(d2 > 0 ? VolumeCfg::STEP_P : VolumeCfg::STEP_M);
+        } else {
+            logPush(Evt::encStep(2, d2));
+        }
     }
 }
 
@@ -476,29 +656,40 @@ void setup() {
     tft.fillScreen(GC9A01A_BLACK);
     tftText(40, 100, 2, GC9A01A_WHITE, "Init...");
 
-    // Touch reset
-    pinMode(Pins::TP_RST, OUTPUT);
-    digitalWrite(Pins::TP_RST, LOW);
-    delay(20);
-    digitalWrite(Pins::TP_RST, HIGH);
-    delay(80);
+    // Touch disabled — CST816S не подключён
+    // pinMode(Pins::TP_RST, OUTPUT); ...
 
     // I2C init + scan
     Wire.begin(Pins::I2C_SDA, Pins::I2C_SCL);
     i2cScan();
+    Serial.print("Wire  found: ");
+    for (uint8_t i = 0; i < foundCnt; i++) Serial.printf("0x%02X ", foundAddrs[i]);
+    Serial.println();
 
-    // Touch begin
-    touch.begin();
+    Wire1.begin(Pins::I2C1_SDA, Pins::I2C1_SCL);
+    i2cScan1();
+    Serial.print("Wire1 found: ");
+    for (uint8_t i = 0; i < foundCnt1; i++) Serial.printf("0x%02X ", foundAddrs1[i]);
+    Serial.println();
 
-    // OLED init
-    oledOk = false;
-    for (size_t i = 0; i < (sizeof(OledCfg::AddrCandidates) / sizeof(OledCfg::AddrCandidates[0])); i++) {
-        uint8_t a = OledCfg::AddrCandidates[i];
-        if (!hasAddr(a)) continue;
-        if (oled.begin(SSD1306_SWITCHCAPVCC, a)) {
-            oledOk = true;
-            oledAddr = a;
-            break;
+    // OLED init — слоты 0..WIRE1_FROM-1 на Wire, остальные на Wire1
+    for (uint8_t i = 0; i < OledCfg::COUNT; i++) {
+        uint8_t a = OledCfg::ADDRS[i];
+        bool onWire1 = (i >= OledCfg::WIRE1_FROM);
+        bool found = onWire1 ? hasAddr1(a) : hasAddr(a);
+        if (!found) { Serial.printf("OLED[%d] 0x%02X: not on %s\n", i, a, onWire1 ? "Wire1" : "Wire"); continue; }
+        // конфликт адресов только внутри одной шины
+        bool taken = false;
+        for (uint8_t j = 0; j < i; j++) {
+            bool jWire1 = (j >= OledCfg::WIRE1_FROM);
+            if (oledOk[j] && jWire1 == onWire1 && OledCfg::ADDRS[j] == a) { taken = true; break; }
+        }
+        if (taken) { Serial.printf("OLED[%d] 0x%02X: address conflict on %s\n", i, a, onWire1 ? "Wire1" : "Wire"); continue; }
+        if (oleds[i]->begin(SSD1306_SWITCHCAPVCC, a)) {
+            oledOk[i] = true;
+            Serial.printf("OLED[%d] 0x%02X %dx%d on %s: OK\n", i, a, OledCfg::WIDTHS[i], OledCfg::HEIGHTS[i], onWire1 ? "Wire1" : "Wire");
+        } else {
+            Serial.printf("OLED[%d] 0x%02X: begin() failed\n", i, a);
         }
     }
 
@@ -544,13 +735,15 @@ void setup() {
     tft.fillScreen(GC9A01A_BLACK);
     logPush(Evt::BOOT);
 
-    if (oledOk) {
+    bool anyOled = false;
+    for (uint8_t i = 0; i < OledCfg::COUNT; i++) {
+        if (!oledOk[i]) continue;
+        anyOled = true;
         char msg[LogCfg::LEN];
-        Evt::oledAddr(msg, sizeof(msg), oledAddr);
+        snprintf(msg, sizeof(msg), "OLED[%d]:0x%02X", i, OledCfg::ADDRS[i]);
         logPush(msg);
-    } else {
-        logPush(Evt::OLED_NOTFOUND);
     }
+    if (!anyOled) logPush(Evt::OLED_NOTFOUND);
 
     logPush(Evt::READY);
 }
@@ -559,8 +752,20 @@ void loop() {
     scanButtons();
     handleEncoderKeysFromMux();
     handleEncoders();
-    handleTouch();
+    // handleTouch(); // Touch disabled — CST816S не подключён
     oledRender();
+
+    if (g_bleDisconnected) {
+        g_bleDisconnected = false;
+        g_tempMain = NAN;
+        g_tempPass = NAN;
+    }
+
+    if (g_needSync && g_deviceConnected) {
+        g_needSync = false;
+        bleSend("EVT:SYNC");   // приложение должно ответить текущими FB значениями
+        logPush("SYNC->");
+    }
 
     if (g_rxPending) {
         g_rxPending = false;

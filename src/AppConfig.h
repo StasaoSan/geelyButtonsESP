@@ -19,9 +19,13 @@ namespace Pins {
     static constexpr int TFT_DC  = 27;
     static constexpr int TFT_RST = 25;
 
-    // I2C (Touch + OLED)
+    // I2C Wire (два 64x32 OLED)
     static constexpr int I2C_SDA = 21;
     static constexpr int I2C_SCL = 22;
+
+    // I2C Wire1 (128x32 OLED, бывшие TFT_CS/TFT_DC)
+    static constexpr int I2C1_SDA = 26;
+    static constexpr int I2C1_SCL = 27;
 
     // Touch (CST816S)
     static constexpr int TP_RST = 32;
@@ -43,12 +47,16 @@ namespace Pins {
     static constexpr int ENC2_B = 16;
 }
 
-// ===================== OLED =====================
+// ===================== OLED (multi-screen) =====================
 namespace OledCfg {
-    static constexpr int W = 128;
-    static constexpr int H = 64;
-    // базовые кандидаты; фактический адрес выбирается после i2cScan()
-    static constexpr uint8_t AddrCandidates[] = {0x3C, 0x3D, 0x03, 0x3F};
+    static constexpr uint8_t COUNT      = 3;
+    static constexpr uint8_t WIRE1_FROM = 2;
+
+    static constexpr uint8_t ADDRS[COUNT]   = {0x3C, 0x3D, 0x3C};
+    static constexpr uint8_t WIDTHS[COUNT]  = { 64,   64,  128};
+    static constexpr uint8_t HEIGHTS[COUNT] = { 32,   32,   32};
+
+    static constexpr uint8_t AddrCandidates[] = {0x3C, 0x3D};
 }
 
 // ===================== Buttons / MUX mapping =====================
@@ -56,9 +64,9 @@ namespace BtnCfg {
     static constexpr uint8_t BTN_FIRST_CH = 0;
     static constexpr uint8_t BTN_COUNT    = 16;
 
-    // Encoder keys (через индексы в readButtonPressedByIndex(idx))
-    static constexpr uint8_t ENC1_KEY_IDX = 1;
-    static constexpr uint8_t ENC2_KEY_IDX = 2;
+    // Encoder keys
+    static constexpr uint8_t ENC1_KEY_IDX = 14;
+    static constexpr uint8_t ENC2_KEY_IDX = 15;
 
     static constexpr uint16_t DEBOUNCE_MS = 30;
     static constexpr uint16_t LONG_MS     = 450;
@@ -83,6 +91,31 @@ namespace LogCfg {
     static constexpr uint8_t  LEN   = 32;
 }
 
+// ===================== Climate direction cycle =====================
+// Кнопка BTN_IDX циклически перебирает комбинации зон обдува
+namespace ClimateDirCfg {
+    static constexpr uint8_t BTN_IDX   = 6;
+    static constexpr uint8_t MODE_COUNT = 5;
+    static constexpr const char* EVENTS[MODE_COUNT] = {
+        "EVT:CLIMATE:BODY",
+        "EVT:CLIMATE:BODY+LEGS",
+        "EVT:CLIMATE:LEGS",
+        "EVT:CLIMATE:LEGS+WINDOWS",
+        "EVT:CLIMATE:WINDOWS",
+    };
+}
+
+// ===================== Volume mode (enc2) =====================
+namespace VolumeCfg {
+    static constexpr uint8_t MODE_BTN_IDX = 12; // long press → toggle enc2 → volume mode
+    static constexpr int     MIN          = 0;
+    static constexpr int     MAX          = 100;
+    static constexpr const char* STEP_P   = "EVT:VOLUME:+1";
+    static constexpr const char* STEP_M   = "EVT:VOLUME:-1";
+    static constexpr const char* MODE_ON  = "EVT:VOL_MODE:ON";
+    static constexpr const char* MODE_OFF = "EVT:VOL_MODE:OFF";
+}
+
 // ===================== Event strings + форматтеры =====================
 namespace Evt {
     // статические
@@ -95,48 +128,48 @@ namespace Evt {
 
     static constexpr const char* ENC1_P        = "EVT:TEMP_MAIN:+1";
     static constexpr const char* ENC1_M        = "EVT:TEMP_MAIN:-1";
-    static constexpr const char* ENC2_P        = "EVT:TEMP_PASS:+1";
-    static constexpr const char* ENC2_M        = "EVT:TEMP_PASS:-1";
+    static constexpr const char* ENC2_P        = "EVT:TEMP_PASS:-1";
+    static constexpr const char* ENC2_M        = "EVT:TEMP_PASS:+1";
 
-    static constexpr const char* ENC1_CLICK    = "EVT:CLIMATE_SW";
-    static constexpr const char* ENC1_LONG     = "EVT:DUAL_SW";
-    static constexpr const char* ENC2_CLICK    = "EVT:REAR_DEFROST";
-    static constexpr const char* ENC2_LONG     = "EVT:ELECTRIC_DEFROST";
+    static constexpr const char* ENC1_CLICK    = "EVT:CLIMATE_MODE";  //  chage climate (body / legs / windows in some order)
+    static constexpr const char* ENC1_LONG     = "EVT:CLIMATE:AUTO";  // auto mode
+    static constexpr const char* ENC2_CLICK    = "EVT:DUAL_SW";       // synchronizaton main and pass temps
+    static constexpr const char* ENC2_LONG     = "EVT:RECIRCULATION"; // recirculation mode
 
     static constexpr const char* BTN_CLICK[BtnCfg::BTN_COUNT] = {
-            "EVT:BTN:C0:CLICK", // nothing connected yet
-            "", // encoder key handled separately
-            "", // encoder key handled separately
-            "EVT:FAN:+1",            // d3
-            "EVT:FAN:-1",            // d4
-            "EVT:CLIMATE_BODY",      // d5
-            "EVT:CLIMATE_LEGS",      // d6
-            "EVT:CLIMATE_WINDOWS",   // d7
-            "EVT:THUNK",             // d8
-            "EVT:DRIVER_HEAT",       // d9
-            "EVT:DRIVER_FAN",        // d10
-            "EVT:WHEEL_HEAT",        // d11
-            "EVT:PASS_HEAT",         // d12
-            "EVT:PASS_FAN",          // d13
-            "EVT:BTN:C14:CLICK",     // d14
-            "EVT:BTN:C15:CLICK",     // d15
+            "EVT:DRIVER_FAN",        // d0
+            "EVT:DRIVER_HEAT",       // d1
+            "EVT:ELECTRIC_DEFROST",  // d2
+            "EVT:WHEEL_HEAT",        // d3
+            "EVT:FAN:+1",            // d4
+            "EVT:FAN:-1",            // d5
+            "",                      // d6
+            "EVT:BTN:C7:CLICK",      // d7 empty
+            "EVT:REAR_LEFT_HEAT",    // d8 (intent not ready)
+            "EVT:REAR_RIGHT_HEAT",   // d9 (intent not ready)
+            "EVT:PASS_FAN",         // d10
+            "EVT:PASS_HEAT",        // d11
+            "EVT:THUNK",            // d12
+            "EVT:DRIVE_MODE",       // d13
+            "",                     // encoder key handled separately
+            "",                     // encoder key handled separately
     };
 
     static constexpr const char* BTN_LONG[BtnCfg::BTN_COUNT] = {
-            "EVT:BTN:C0:LONG",
-            "EVT:BTN:C1:LONG",
-            "EVT:BTN:C2:LONG",
-            "EVT:BTN:C3:LONG",
+            "EVT:DRIVER_FAN_OFF",
+            "EVT:DRIVER_HEAT_OFF",
+            "EVT:REAR_DEFROST",
+            "EVT:WHEEL_HEAT_OFF",
             "EVT:BTN:C4:LONG",
             "EVT:BTN:C5:LONG",
             "EVT:BTN:C6:LONG",
             "EVT:BTN:C7:LONG",
-            "EVT:BTN:C8:LONG",
-            "EVT:DRIVER_HEAT_OFF",   // d9
-            "EVT:DRIVER_FAN_OFF",    // d10
-            "EVT:WHEEL_HEAT_OFF",    // d11
-            "EVT:PASS_HEAT_OFF",     // d12
-            "EVT:PASS_FAN_OFF",      // d13
+            "EVT:RL_HEAT_OFF",
+            "EVT:RR_HEAT_OFF",   // d9
+            "EVT:PASS_FAN_OFF", // d10
+            "EVT:PASS_HEAT_OFF",// d11
+            "EVT:BTN:C12:LONG", // d12
+            "EVT:SCREEN_BRIGHT", // d13 max / auto display bright
             "EVT:BTN:C14:LONG",
             "EVT:BTN:C15:LONG",
     };
