@@ -19,13 +19,17 @@ namespace Pins {
     static constexpr int TFT_DC  = 27;
     static constexpr int TFT_RST = 25;
 
-    // I2C Wire (два 64x32 OLED)
+    // oled: первый 64x32
     static constexpr int I2C_SDA = 21;
     static constexpr int I2C_SCL = 22;
 
-    // I2C Wire1 (128x32 OLED, бывшие TFT_CS/TFT_DC)
-    static constexpr int I2C1_SDA = 26;
-    static constexpr int I2C1_SCL = 27;
+    // oled1: второй 64x32
+    static constexpr int I2C1_SDA = 32;
+    static constexpr int I2C1_SCL = 25;
+
+    // oled2: 128x32
+    static constexpr int I2C2_SDA = 26;
+    static constexpr int I2C2_SCL = 27;
 
     // Touch (CST816S)
     static constexpr int TP_RST = 32;
@@ -50,9 +54,12 @@ namespace Pins {
 // ===================== OLED (multi-screen) =====================
 namespace OledCfg {
     static constexpr uint8_t COUNT      = 3;
-    static constexpr uint8_t WIRE1_FROM = 2;
+    static constexpr uint8_t WIRE1_FROM = 1;   // oled0 — Wire, oled1+oled2 — Wire1
 
-    static constexpr uint8_t ADDRS[COUNT]   = {0x3C, 0x3D, 0x3C};
+    // oled0: 64x32 @ 0x3C — Wire (21/22)
+    // oled1: 64x32 @ 0x3C — Wire1 с I2C1_SDA/SCL (32/25)
+    // oled2: 128x32 @ 0x3C — Wire1 с I2C2_SDA/SCL (26/27)
+    static constexpr uint8_t ADDRS[COUNT]   = {0x3C, 0x3C, 0x3C};
     static constexpr uint8_t WIDTHS[COUNT]  = { 64,   64,  128};
     static constexpr uint8_t HEIGHTS[COUNT] = { 32,   32,   32};
 
@@ -110,8 +117,8 @@ namespace VolumeCfg {
     static constexpr uint8_t MODE_BTN_IDX = 12; // long press → toggle enc2 → volume mode
     static constexpr int     MIN          = 0;
     static constexpr int     MAX          = 100;
-    static constexpr const char* STEP_P   = "EVT:VOLUME:+1";
     static constexpr const char* STEP_M   = "EVT:VOLUME:-1";
+    static constexpr const char* STEP_P   = "EVT:VOLUME:+1";
     static constexpr const char* MODE_ON  = "EVT:VOL_MODE:ON";
     static constexpr const char* MODE_OFF = "EVT:VOL_MODE:OFF";
 }

@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include <SPI.h>
 #include <Wire.h>
+#include <Preferences.h>
+#include "driver/gpio.h"  // gpio_reset_pin()
 #include <cstring>
 #include <string>
 #include <cmath>   // isnan, NAN
@@ -97,6 +99,22 @@ static void bleInit() {
     BLEDevice::startAdvertising();
 }
 
+// ===================== Wire1 pin multiplexer =====================
+// ESP32 GPIO matrix не сбрасывает маппинг старых пинов при end()+begin().
+// gpio_reset_pin() явно отключает пин от периферии до переключения.
+static int g_wire1Sda = -1;
+static int g_wire1Scl = -1;
+
+static void wire1SwitchTo(int sda, int scl) {
+    if (g_wire1Sda == sda && g_wire1Scl == scl) return;
+    if (g_wire1Sda >= 0) gpio_reset_pin((gpio_num_t)g_wire1Sda);
+    if (g_wire1Scl >= 0) gpio_reset_pin((gpio_num_t)g_wire1Scl);
+    Wire1.end();
+    Wire1.begin(sda, scl);
+    g_wire1Sda = sda;
+    g_wire1Scl = scl;
+}
+
 // ===================== Hardware instances =====================
 Adafruit_GC9A01A tft(Pins::TFT_CS, Pins::TFT_DC, Pins::TFT_RST);
 
@@ -104,7 +122,7 @@ Adafruit_GC9A01A tft(Pins::TFT_CS, Pins::TFT_DC, Pins::TFT_RST);
 CST816S touch(Pins::I2C_SDA, Pins::I2C_SCL, Pins::TP_RST, Pins::TP_INT);
 
 static Adafruit_SSD1306 oled0(OledCfg::WIDTHS[0], OledCfg::HEIGHTS[0], &Wire,  -1);
-static Adafruit_SSD1306 oled1(OledCfg::WIDTHS[1], OledCfg::HEIGHTS[1], &Wire,  -1);
+static Adafruit_SSD1306 oled1(OledCfg::WIDTHS[1], OledCfg::HEIGHTS[1], &Wire1, -1);
 static Adafruit_SSD1306 oled2(OledCfg::WIDTHS[2], OledCfg::HEIGHTS[2], &Wire1, -1);
 static Adafruit_SSD1306* const oleds[OledCfg::COUNT] = {&oled0, &oled1, &oled2};
 static bool oledOk[OledCfg::COUNT] = {};
@@ -173,6 +191,7 @@ static char g_fanLevel[12] = "?";  // OFF/AUTO/L1..L9/UNK
 static float g_tempMain = NAN;     // area=1
 static float g_tempPass = NAN;     // area=4
 
+static Preferences g_prefs;
 static bool g_enc2VolumeMode = false;
 static int  g_volumeLevel    = 50;   // 0..100
 static uint8_t g_climDir     = 0;    // индекс в ClimateDirCfg::EVENTS
@@ -414,7 +433,7 @@ static void oledRender() {
 
     if (oledOk[0]) {
         if (!oledOk[1]) {
-            // Оба 64x32 на одном адресе (0x3C) — показываем обе температуры на одном экране
+            // Второй экран недоступен — обе температуры на одном
             if (g_enc2VolumeMode) oledRenderVolScreen(oled0);
             else                  oledRenderDualTempScreen(oled0, g_tempMain, g_tempPass);
         } else {
@@ -422,17 +441,13 @@ static void oledRender() {
         }
     }
     if (oledOk[1]) {
+        wire1SwitchTo(Pins::I2C1_SDA, Pins::I2C1_SCL);
         if (g_enc2VolumeMode) oledRenderVolScreen(oled1);
         else                  oledRenderTempScreen(oled1, g_tempPass);
     }
     if (oledOk[2]) {
+        wire1SwitchTo(Pins::I2C2_SDA, Pins::I2C2_SCL);
         oledRenderOne(oled2);
-        // строка статуса экранов внизу oled2 (для диагностики адресов)
-        oled2.setTextSize(1);
-        oled2.setTextColor(SSD1306_WHITE);
-        oled2.setCursor(0, 24);
-        oled2.printf("scr:%d%d%d", oledOk[0]?1:0, oledOk[1]?1:0, oledOk[2]?1:0);
-        oled2.display();
     }
 }
 
@@ -493,6 +508,7 @@ static void handleButtonEvent(uint8_t idx, bool isLong) {
     // Переключение enc2 в режим громкости (долгое нажатие C12)
     if (isLong && idx == VolumeCfg::MODE_BTN_IDX) {
         g_enc2VolumeMode = !g_enc2VolumeMode;
+        g_prefs.putBool("volMode", g_enc2VolumeMode);
         logPush(g_enc2VolumeMode ? VolumeCfg::MODE_ON : VolumeCfg::MODE_OFF);
         return;
     }
@@ -559,9 +575,9 @@ static void handleEncoders() {
     if (d2 != 0) {
         enc2Last = p2;
         if (g_enc2VolumeMode) {
-            g_volumeLevel = constrain(g_volumeLevel + (d2 > 0 ? 1 : -1),
+            g_volumeLevel = constrain(g_volumeLevel + (d2 > 0 ? -1 : 1),
                                       VolumeCfg::MIN, VolumeCfg::MAX);
-            logPush(d2 > 0 ? VolumeCfg::STEP_P : VolumeCfg::STEP_M);
+            logPush(d2 > 0 ? VolumeCfg::STEP_M : VolumeCfg::STEP_P);
         } else {
             logPush(Evt::encStep(2, d2));
         }
@@ -666,32 +682,39 @@ void setup() {
     for (uint8_t i = 0; i < foundCnt; i++) Serial.printf("0x%02X ", foundAddrs[i]);
     Serial.println();
 
-    Wire1.begin(Pins::I2C1_SDA, Pins::I2C1_SCL);
+    // OLED 0 — Wire (21/22)
+    if (hasAddr(OledCfg::ADDRS[0])) {
+        if (oled0.begin(SSD1306_SWITCHCAPVCC, OledCfg::ADDRS[0])) {
+            oledOk[0] = true;
+            Serial.printf("OLED[0] 0x%02X %dx%d Wire: OK\n", OledCfg::ADDRS[0], OledCfg::WIDTHS[0], OledCfg::HEIGHTS[0]);
+        } else { Serial.printf("OLED[0]: begin() failed\n"); }
+    } else { Serial.printf("OLED[0] 0x%02X: not found on Wire\n", OledCfg::ADDRS[0]); }
+
+    // OLED 1 — Wire1 на пинах I2C1 (32/25)
+    wire1SwitchTo(Pins::I2C1_SDA, Pins::I2C1_SCL);
     i2cScan1();
-    Serial.print("Wire1 found: ");
+    Serial.print("Wire1(I2C1 32/25) found: ");
     for (uint8_t i = 0; i < foundCnt1; i++) Serial.printf("0x%02X ", foundAddrs1[i]);
     Serial.println();
+    if (hasAddr1(OledCfg::ADDRS[1])) {
+        if (oled1.begin(SSD1306_SWITCHCAPVCC, OledCfg::ADDRS[1])) {
+            oledOk[1] = true;
+            Serial.printf("OLED[1] 0x%02X %dx%d Wire1(I2C1): OK\n", OledCfg::ADDRS[1], OledCfg::WIDTHS[1], OledCfg::HEIGHTS[1]);
+        } else { Serial.printf("OLED[1]: begin() failed\n"); }
+    } else { Serial.printf("OLED[1] 0x%02X: not found on Wire1(I2C1)\n", OledCfg::ADDRS[1]); }
 
-    // OLED init — слоты 0..WIRE1_FROM-1 на Wire, остальные на Wire1
-    for (uint8_t i = 0; i < OledCfg::COUNT; i++) {
-        uint8_t a = OledCfg::ADDRS[i];
-        bool onWire1 = (i >= OledCfg::WIRE1_FROM);
-        bool found = onWire1 ? hasAddr1(a) : hasAddr(a);
-        if (!found) { Serial.printf("OLED[%d] 0x%02X: not on %s\n", i, a, onWire1 ? "Wire1" : "Wire"); continue; }
-        // конфликт адресов только внутри одной шины
-        bool taken = false;
-        for (uint8_t j = 0; j < i; j++) {
-            bool jWire1 = (j >= OledCfg::WIRE1_FROM);
-            if (oledOk[j] && jWire1 == onWire1 && OledCfg::ADDRS[j] == a) { taken = true; break; }
-        }
-        if (taken) { Serial.printf("OLED[%d] 0x%02X: address conflict on %s\n", i, a, onWire1 ? "Wire1" : "Wire"); continue; }
-        if (oleds[i]->begin(SSD1306_SWITCHCAPVCC, a)) {
-            oledOk[i] = true;
-            Serial.printf("OLED[%d] 0x%02X %dx%d on %s: OK\n", i, a, OledCfg::WIDTHS[i], OledCfg::HEIGHTS[i], onWire1 ? "Wire1" : "Wire");
-        } else {
-            Serial.printf("OLED[%d] 0x%02X: begin() failed\n", i, a);
-        }
-    }
+    // OLED 2 — Wire1 переключён на пины I2C2 (26/27)
+    wire1SwitchTo(Pins::I2C2_SDA, Pins::I2C2_SCL);
+    i2cScan1();
+    Serial.print("Wire1(I2C2 26/27) found: ");
+    for (uint8_t i = 0; i < foundCnt1; i++) Serial.printf("0x%02X ", foundAddrs1[i]);
+    Serial.println();
+    if (hasAddr1(OledCfg::ADDRS[2])) {
+        if (oled2.begin(SSD1306_SWITCHCAPVCC, OledCfg::ADDRS[2])) {
+            oledOk[2] = true;
+            Serial.printf("OLED[2] 0x%02X %dx%d Wire1(I2C2): OK\n", OledCfg::ADDRS[2], OledCfg::WIDTHS[2], OledCfg::HEIGHTS[2]);
+        } else { Serial.printf("OLED[2]: begin() failed\n"); }
+    } else { Serial.printf("OLED[2] 0x%02X: not found on Wire1(I2C2)\n", OledCfg::ADDRS[2]); }
 
     // MUX init
     pinMode(Pins::MUX_S0, OUTPUT);
@@ -730,6 +753,10 @@ void setup() {
 
     // BLE
     bleInit();
+
+    // NVS — load persisted state
+    g_prefs.begin("geely", false);
+    g_enc2VolumeMode = g_prefs.getBool("volMode", false);
 
     // Ready
     tft.fillScreen(GC9A01A_BLACK);
