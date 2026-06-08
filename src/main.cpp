@@ -167,17 +167,6 @@ static void tftStatusCircle(const char* s) {
     CircleText::drawWithConfig(tft, cfg, s, CircleTextPos::Top);
 }
 
-static void tftBottomCircleXY(int16_t x, int16_t y) {
-    auto cfg = TftTextCfg::Bottom();
-    tft.fillRect(0, cfg.topY, 240, (cfg.bottomY - cfg.topY + 1), GC9A01A_BLACK);
-
-    char buf[64];
-    snprintf(buf, sizeof(buf), "X:%d  Y:%d", x, y);
-
-    tft.setTextWrap(false);
-    CircleText::drawWithConfig(tft, cfg, buf, CircleTextPos::Bottom);
-}
-
 // ===================== Logger =====================
 static char logBuf[LogCfg::LINES][LogCfg::LEN];
 static uint8_t logHead = 0;
@@ -194,7 +183,6 @@ static float g_tempPass = NAN;     // area=4
 static Preferences g_prefs;
 static bool g_enc2VolumeMode = false;
 static int  g_volumeLevel    = 50;   // 0..100
-static uint8_t g_climDir     = 0;    // индекс в ClimateDirCfg::EVENTS
 
 static void logPush(const char* msg) {
     strncpy(logBuf[logHead], msg, LogCfg::LEN - 1);
@@ -498,24 +486,16 @@ static uint32_t btnDownMs[BtnCfg::BTN_COUNT];
 static bool btnWasDown[BtnCfg::BTN_COUNT];
 
 static void handleButtonEvent(uint8_t idx, bool isLong) {
-    // Climate direction cycle (один клик — следующая комбинация зон)
-    if (!isLong && idx == ClimateDirCfg::BTN_IDX) {
-        g_climDir = (g_climDir + 1) % ClimateDirCfg::MODE_COUNT;
-        logPush(ClimateDirCfg::EVENTS[g_climDir]);
-        return;
-    }
-
-    // Переключение enc2 в режим громкости (долгое нажатие C12)
+    // Volume mode toggle (ESP-internal: changes enc2 behavior and OLED display)
     if (isLong && idx == VolumeCfg::MODE_BTN_IDX) {
         g_enc2VolumeMode = !g_enc2VolumeMode;
         g_prefs.putBool("volMode", g_enc2VolumeMode);
-        logPush(g_enc2VolumeMode ? VolumeCfg::MODE_ON : VolumeCfg::MODE_OFF);
-        return;
+        logDirty = true;
     }
 
-    // Стандартная обработка
-    const char* ev = isLong ? Evt::btnLongByIdx(idx) : Evt::btnClickByIdx(idx);
-    if (ev && ev[0] != '\0') logPush(ev);
+    char ev[LogCfg::LEN];
+    Evt::btnEvent(ev, sizeof(ev), idx, isLong);
+    logPush(ev);
 }
 
 static void scanButtons() {
@@ -567,7 +547,9 @@ static void handleEncoders() {
     long d1 = p1 - enc1Last;
     if (d1 != 0) {
         enc1Last = p1;
-        logPush(Evt::encStep(1, d1));
+        char ev[LogCfg::LEN];
+        Evt::encStep(ev, sizeof(ev), 1, d1);
+        logPush(ev);
     }
 
     long p2 = enc2.readEncoder();
@@ -579,7 +561,9 @@ static void handleEncoders() {
                                       VolumeCfg::MIN, VolumeCfg::MAX);
             logPush(d2 > 0 ? VolumeCfg::STEP_M : VolumeCfg::STEP_P);
         } else {
-            logPush(Evt::encStep(2, d2));
+            char ev[LogCfg::LEN];
+            Evt::encStep(ev, sizeof(ev), 2, d2);
+            logPush(ev);
         }
     }
 }
@@ -597,66 +581,10 @@ static void handleEncoderKeysFromMux() {
             encKeyWasDown[i] = false;
             uint32_t dur = millis() - encKeyDownMs[i];
             bool isLong = (dur >= EncCfg::KEY_LONG_MS);
-            logPush(Evt::encKey((i == 0) ? 1 : 2, isLong));
+            char ev[LogCfg::LEN];
+            Evt::encKey(ev, sizeof(ev), (i == 0) ? 1 : 2, isLong);
+            logPush(ev);
         }
-    }
-}
-
-// ===================== Touch =====================
-static bool touchDown = false;
-static uint32_t lastTouchEventMs = 0;
-static uint32_t lastTouchLogMs = 0;
-static int16_t lastTx = -1, lastTy = -1;
-
-static void handleTouch() {
-    uint32_t now = millis();
-
-    if (touchDown && (now - lastTouchEventMs) > TouchCfg::UP_TIMEOUT_MS) {
-        touchDown = false;
-        logPush(Evt::TOUCH_UP);
-        return;
-    }
-
-    if (!touch.available()) return;
-
-    int16_t x = (int16_t)touch.data.x;
-    int16_t y = (int16_t)touch.data.y;
-    if (x == 0 && y == 0) return;
-
-    x = constrain(x, 0, 239);
-    y = constrain(y, 0, 239);
-
-    lastTouchEventMs = now;
-
-    if (!touchDown) {
-        touchDown = true;
-        lastTx = x;
-        lastTy = y;
-        lastTouchLogMs = 0;
-        logPush(Evt::TOUCH_DOWN);
-    }
-
-    static int16_t lastDrawX = -1, lastDrawY = -1;
-    static uint32_t lastDrawMs = 0;
-    if (now - lastDrawMs >= 40) {
-        if (x != lastDrawX || y != lastDrawY) {
-            lastDrawX = x;
-            lastDrawY = y;
-            lastDrawMs = now;
-            tft.fillCircle(x, y, 3, GC9A01A_GREEN);
-            tftBottomCircleXY(x, y);
-        }
-    }
-
-    uint16_t dist = (uint16_t)abs(x - lastTx) + (uint16_t)abs(y - lastTy);
-    if ((now - lastTouchLogMs) >= TouchCfg::LOG_MIN_MS && dist >= TouchCfg::LOG_MIN_DIST) {
-        lastTouchLogMs = now;
-        lastTx = x;
-        lastTy = y;
-
-        char msg[LogCfg::LEN];
-        Evt::touchXY(msg, sizeof(msg), x, y);
-        logPush(msg);
     }
 }
 
@@ -779,7 +707,6 @@ void loop() {
     scanButtons();
     handleEncoderKeysFromMux();
     handleEncoders();
-    // handleTouch(); // Touch disabled — CST816S не подключён
     oledRender();
 
     if (g_bleDisconnected) {
