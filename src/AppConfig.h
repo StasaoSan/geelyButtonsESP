@@ -1,8 +1,6 @@
 #pragma once
 #include <Arduino.h>
 
-#include "CircleText.h"
-
 // ===================== BLE =====================
 namespace Cfg {
     static constexpr const char* BLE_NAME = "geelyController";
@@ -123,20 +121,5 @@ namespace Evt {
     // EVT:ENC:<enc>:CLICK  or  EVT:ENC:<enc>:LONG
     static inline void encKey(char* out, size_t n, uint8_t enc, bool isLong) {
         snprintf(out, n, "EVT:ENC:%d:%s", enc, isLong ? "LONG" : "CLICK");
-    }
-}
-
-// ===================== TFT circle text configs =====================
-namespace TftTextCfg {
-    static inline CircleTextConfig Status() {
-        CircleTextConfig c;
-        c.cx = 120; c.cy = 120; c.r = 118;
-        c.topY = 6;
-        c.bottomY = 52;
-        c.margin = 8;
-        c.lineGap = 2;
-        c.textSize = 2;
-        c.color = 0xFFFF;
-        return c;
     }
 }
